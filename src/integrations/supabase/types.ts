@@ -47,6 +47,45 @@ export type Database = {
         }
         Relationships: []
       }
+      connected_accounts: {
+        Row: {
+          access_token: string | null
+          account_identifier: string
+          account_name: string
+          connection_status: Database["public"]["Enums"]["connection_status"]
+          created_at: string
+          created_by: string | null
+          id: string
+          last_sync_at: string | null
+          platform: Database["public"]["Enums"]["publishing_platform"]
+          updated_at: string
+        }
+        Insert: {
+          access_token?: string | null
+          account_identifier: string
+          account_name: string
+          connection_status?: Database["public"]["Enums"]["connection_status"]
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          last_sync_at?: string | null
+          platform: Database["public"]["Enums"]["publishing_platform"]
+          updated_at?: string
+        }
+        Update: {
+          access_token?: string | null
+          account_identifier?: string
+          account_name?: string
+          connection_status?: Database["public"]["Enums"]["connection_status"]
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          last_sync_at?: string | null
+          platform?: Database["public"]["Enums"]["publishing_platform"]
+          updated_at?: string
+        }
+        Relationships: []
+      }
       generation_jobs: {
         Row: {
           character_id: string | null
@@ -97,31 +136,43 @@ export type Database = {
       images: {
         Row: {
           character_id: string | null
+          connected_account_id: string | null
           created_at: string
           created_by: string | null
+          external_post_id: string | null
           id: string
           image_url: string
           prompt: string | null
+          publish_status: Database["public"]["Enums"]["publish_status"]
+          published_at: string | null
           status: Database["public"]["Enums"]["content_status"]
           updated_at: string
         }
         Insert: {
           character_id?: string | null
+          connected_account_id?: string | null
           created_at?: string
           created_by?: string | null
+          external_post_id?: string | null
           id?: string
           image_url: string
           prompt?: string | null
+          publish_status?: Database["public"]["Enums"]["publish_status"]
+          published_at?: string | null
           status?: Database["public"]["Enums"]["content_status"]
           updated_at?: string
         }
         Update: {
           character_id?: string | null
+          connected_account_id?: string | null
           created_at?: string
           created_by?: string | null
+          external_post_id?: string | null
           id?: string
           image_url?: string
           prompt?: string | null
+          publish_status?: Database["public"]["Enums"]["publish_status"]
+          published_at?: string | null
           status?: Database["public"]["Enums"]["content_status"]
           updated_at?: string
         }
@@ -131,6 +182,13 @@ export type Database = {
             columns: ["character_id"]
             isOneToOne: false
             referencedRelation: "characters"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "images_connected_account_id_fkey"
+            columns: ["connected_account_id"]
+            isOneToOne: false
+            referencedRelation: "connected_accounts"
             referencedColumns: ["id"]
           },
         ]
@@ -255,10 +313,14 @@ export type Database = {
       videos: {
         Row: {
           character_id: string | null
+          connected_account_id: string | null
           created_at: string
           created_by: string | null
+          external_post_id: string | null
           id: string
           prompt: string | null
+          publish_status: Database["public"]["Enums"]["publish_status"]
+          published_at: string | null
           scene_prompts: Json
           status: Database["public"]["Enums"]["content_status"]
           updated_at: string
@@ -266,10 +328,14 @@ export type Database = {
         }
         Insert: {
           character_id?: string | null
+          connected_account_id?: string | null
           created_at?: string
           created_by?: string | null
+          external_post_id?: string | null
           id?: string
           prompt?: string | null
+          publish_status?: Database["public"]["Enums"]["publish_status"]
+          published_at?: string | null
           scene_prompts?: Json
           status?: Database["public"]["Enums"]["content_status"]
           updated_at?: string
@@ -277,10 +343,14 @@ export type Database = {
         }
         Update: {
           character_id?: string | null
+          connected_account_id?: string | null
           created_at?: string
           created_by?: string | null
+          external_post_id?: string | null
           id?: string
           prompt?: string | null
+          publish_status?: Database["public"]["Enums"]["publish_status"]
+          published_at?: string | null
           scene_prompts?: Json
           status?: Database["public"]["Enums"]["content_status"]
           updated_at?: string
@@ -292,6 +362,13 @@ export type Database = {
             columns: ["character_id"]
             isOneToOne: false
             referencedRelation: "characters"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "videos_connected_account_id_fkey"
+            columns: ["connected_account_id"]
+            isOneToOne: false
+            referencedRelation: "connected_accounts"
             referencedColumns: ["id"]
           },
         ]
@@ -311,10 +388,27 @@ export type Database = {
     }
     Enums: {
       app_role: "admin" | "user"
-      content_status: "pending" | "approved" | "rejected"
+      connection_status: "connected" | "disconnected" | "error" | "pending"
+      content_status:
+        | "pending"
+        | "approved"
+        | "rejected"
+        | "draft"
+        | "pending_review"
+        | "scheduled"
+        | "published"
+        | "failed"
       content_type: "image" | "video"
       job_status: "queued" | "processing" | "completed" | "failed"
       job_type: "image" | "video"
+      publish_status:
+        | "draft"
+        | "pending_review"
+        | "approved"
+        | "scheduled"
+        | "published"
+        | "failed"
+      publishing_platform: "fanvue"
       schedule_status: "scheduled" | "published" | "failed" | "cancelled"
     }
     CompositeTypes: {
@@ -444,10 +538,29 @@ export const Constants = {
   public: {
     Enums: {
       app_role: ["admin", "user"],
-      content_status: ["pending", "approved", "rejected"],
+      connection_status: ["connected", "disconnected", "error", "pending"],
+      content_status: [
+        "pending",
+        "approved",
+        "rejected",
+        "draft",
+        "pending_review",
+        "scheduled",
+        "published",
+        "failed",
+      ],
       content_type: ["image", "video"],
       job_status: ["queued", "processing", "completed", "failed"],
       job_type: ["image", "video"],
+      publish_status: [
+        "draft",
+        "pending_review",
+        "approved",
+        "scheduled",
+        "published",
+        "failed",
+      ],
+      publishing_platform: ["fanvue"],
       schedule_status: ["scheduled", "published", "failed", "cancelled"],
     },
   },
