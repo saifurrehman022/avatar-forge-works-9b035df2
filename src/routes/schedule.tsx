@@ -4,7 +4,6 @@ import {
   CalendarClock,
   CalendarPlus,
   CheckCircle2,
-  XCircle,
   Clock,
   Search,
   Image as ImageIcon,
