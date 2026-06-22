@@ -13,6 +13,7 @@ import { Route as ScheduleRouteImport } from './routes/schedule'
 import { Route as ReviewRouteImport } from './routes/review'
 import { Route as LibraryRouteImport } from './routes/library'
 import { Route as GenerateRouteImport } from './routes/generate'
+import { Route as CharactersRouteImport } from './routes/characters'
 import { Route as IndexRouteImport } from './routes/index'
 
 const ScheduleRoute = ScheduleRouteImport.update({
@@ -35,6 +36,11 @@ const GenerateRoute = GenerateRouteImport.update({
   path: '/generate',
   getParentRoute: () => rootRouteImport,
 } as any)
+const CharactersRoute = CharactersRouteImport.update({
+  id: '/characters',
+  path: '/characters',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
@@ -43,6 +49,7 @@ const IndexRoute = IndexRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/characters': typeof CharactersRoute
   '/generate': typeof GenerateRoute
   '/library': typeof LibraryRoute
   '/review': typeof ReviewRoute
@@ -50,6 +57,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/characters': typeof CharactersRoute
   '/generate': typeof GenerateRoute
   '/library': typeof LibraryRoute
   '/review': typeof ReviewRoute
@@ -58,6 +66,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/characters': typeof CharactersRoute
   '/generate': typeof GenerateRoute
   '/library': typeof LibraryRoute
   '/review': typeof ReviewRoute
@@ -65,14 +74,28 @@ export interface FileRoutesById {
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/generate' | '/library' | '/review' | '/schedule'
+  fullPaths:
+    | '/'
+    | '/characters'
+    | '/generate'
+    | '/library'
+    | '/review'
+    | '/schedule'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/generate' | '/library' | '/review' | '/schedule'
-  id: '__root__' | '/' | '/generate' | '/library' | '/review' | '/schedule'
+  to: '/' | '/characters' | '/generate' | '/library' | '/review' | '/schedule'
+  id:
+    | '__root__'
+    | '/'
+    | '/characters'
+    | '/generate'
+    | '/library'
+    | '/review'
+    | '/schedule'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  CharactersRoute: typeof CharactersRoute
   GenerateRoute: typeof GenerateRoute
   LibraryRoute: typeof LibraryRoute
   ReviewRoute: typeof ReviewRoute
@@ -109,6 +132,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof GenerateRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/characters': {
+      id: '/characters'
+      path: '/characters'
+      fullPath: '/characters'
+      preLoaderRoute: typeof CharactersRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/': {
       id: '/'
       path: '/'
@@ -121,6 +151,7 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  CharactersRoute: CharactersRoute,
   GenerateRoute: GenerateRoute,
   LibraryRoute: LibraryRoute,
   ReviewRoute: ReviewRoute,
