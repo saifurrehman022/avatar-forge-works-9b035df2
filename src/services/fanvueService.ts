@@ -1,196 +1,136 @@
-import { supabase } from "@/integrations/supabase/client";
-import type { TablesInsert, TablesUpdate } from "@/integrations/supabase/types";
-
-export type ConnectedAccountInsert = TablesInsert<"connected_accounts">;
-export type ConnectedAccountUpdate = TablesUpdate<"connected_accounts">;
-
 export type PublishingPlatform = "fanvue";
-export type ConnectionStatus = "connected" | "disconnected" | "error" | "pending";
-export type PublishStatus =
-  | "draft"
-  | "pending_review"
-  | "approved"
-  | "scheduled"
-  | "published"
-  | "failed";
+export type ConnectionStatus = "connected" | "disconnected" | "syncing" | "error";
+export type DefaultVisibility = "public" | "subscribers" | "premium";
+export type CurrencyCode = "USD" | "EUR" | "GBP";
+export type SyncActivityStatus = "success" | "warning" | "failed" | "running";
+export type DeliveryChannel = "email" | "browser" | "inApp";
 
-export type ContentKind = "image" | "video";
-
-export interface FanvuePostPayload {
-  contentId: string;
-  contentKind: ContentKind;
-  connectedAccountId: string;
-  caption?: string;
-  scheduledFor?: string; // ISO timestamp
-  mediaUrl: string;
+export interface ConnectedAccount {
+  id: string;
+  accountName: string;
+  platform: PublishingPlatform;
+  status: ConnectionStatus;
+  lastSyncTime: string | null;
+  accountIdentifier: string;
+  createdDate: string;
+  externalPostCount: number;
 }
 
-export interface FanvuePublishResult {
+export interface SyncActivity {
+  id: string;
+  accountId: string;
+  status: SyncActivityStatus;
+  message: string;
+  occurredAt: string;
+  recordsProcessed: number;
+}
+
+export interface NotificationSettings {
+  generation: Record<DeliveryChannel, boolean>;
+  publishing: Record<DeliveryChannel, boolean>;
+  failedUploads: Record<DeliveryChannel, boolean>;
+  systemAlerts: Record<DeliveryChannel, boolean>;
+}
+
+export interface PublishingDefaults {
+  defaultVisibility: DefaultVisibility;
+  defaultPrice: number;
+  currency: CurrencyCode;
+  defaultCategory: string;
+  watermarkEnabled: boolean;
+  autoPublishEnabled: boolean;
+}
+
+export interface FanvueServiceResponse<T = unknown> {
   ok: boolean;
-  externalPostId?: string;
-  error?: string;
+  data?: T;
+  message: string;
+  requestedAt: string;
 }
 
-/**
- * fanvueService — mock architecture for Fanvue publishing.
- *
- * Responsibilities:
- *  - Connected account CRUD + connection verification
- *  - Build post payloads from internal content records
- *  - Upload / publish content (mocked)
- *  - Track publish status + external post IDs on the content row
- *  - Sync external post state back into the database
- *  - Surface publishing failures
- *
- * No real Fanvue API calls are made yet. All network operations are stubbed
- * with deterministic mock responses so the rest of the system can be wired
- * end-to-end without a live integration.
- */
+export interface PublishContentPayload {
+  contentId: string;
+  accountId: string;
+  caption?: string;
+  visibility?: DefaultVisibility;
+  price?: number;
+}
+
+const mockDelay = async () => new Promise((resolve) => setTimeout(resolve, 120));
+
+const response = <T>(message: string, data?: T): FanvueServiceResponse<T> => ({
+  ok: true,
+  data,
+  message,
+  requestedAt: new Date().toISOString(),
+});
+
 export const fanvueService = {
-  // ---------- Connected accounts ----------
-  async listAccounts(platform: PublishingPlatform = "fanvue") {
-    const { data, error } = await supabase
-      .from("connected_accounts")
-      .select("*")
-      .eq("platform", platform)
-      .order("created_at", { ascending: false });
-    if (error) throw error;
-    return data;
-  },
-
-  async getAccount(id: string) {
-    const { data, error } = await supabase
-      .from("connected_accounts")
-      .select("*")
-      .eq("id", id)
-      .single();
-    if (error) throw error;
-    return data;
-  },
-
-  async connectAccount(payload: Omit<ConnectedAccountInsert, "platform"> & { platform?: PublishingPlatform }) {
-    const insertPayload: ConnectedAccountInsert = {
+  async connectAccount(accountName: string): Promise<FanvueServiceResponse<ConnectedAccount>> {
+    await mockDelay();
+    return response("Mock account connected", {
+      id: `mock_${Date.now()}`,
+      accountName,
       platform: "fanvue",
-      ...payload,
-      connection_status: "connected",
-      last_sync_at: new Date().toISOString(),
-    };
-    const { data, error } = await supabase
-      .from("connected_accounts")
-      .insert(insertPayload)
-      .select()
-      .single();
-    if (error) throw error;
-    return data;
-  },
-
-  async updateAccount(id: string, payload: ConnectedAccountUpdate) {
-    const { data, error } = await supabase
-      .from("connected_accounts")
-      .update(payload)
-      .eq("id", id)
-      .select()
-      .single();
-    if (error) throw error;
-    return data;
-  },
-
-  async disconnectAccount(id: string) {
-    return this.updateAccount(id, {
-      connection_status: "disconnected",
-      access_token: null,
+      status: "connected",
+      lastSyncTime: new Date().toISOString(),
+      accountIdentifier: `fanvue:${accountName.toLowerCase().replace(/\s+/g, "-")}`,
+      createdDate: new Date().toISOString(),
+      externalPostCount: 0,
     });
   },
 
-  async reconnectAccount(id: string, accessToken?: string) {
-    return this.updateAccount(id, {
-      connection_status: "connected",
-      access_token: accessToken ?? null,
-      last_sync_at: new Date().toISOString(),
+  async disconnectAccount(
+    accountId: string,
+  ): Promise<FanvueServiceResponse<{ accountId: string }>> {
+    await mockDelay();
+    return response("Mock account disconnected", { accountId });
+  },
+
+  async reconnectAccount(accountId: string): Promise<FanvueServiceResponse<{ accountId: string }>> {
+    await mockDelay();
+    return response("Mock account reconnected", { accountId });
+  },
+
+  async verifyConnection(
+    accountId: string,
+  ): Promise<FanvueServiceResponse<{ connected: boolean; accountId: string }>> {
+    await mockDelay();
+    return response("Mock connection verified", { connected: true, accountId });
+  },
+
+  async syncAccount(accountId: string): Promise<FanvueServiceResponse<SyncActivity>> {
+    await mockDelay();
+    return response("Mock sync completed", {
+      id: `sync_${Date.now()}`,
+      accountId,
+      status: "success",
+      message: "Pulled latest publishing metadata from mock service.",
+      occurredAt: new Date().toISOString(),
+      recordsProcessed: 18,
     });
   },
 
-  /** Mock connection check — replace with a real Fanvue API ping later. */
-  async verifyConnection(id: string): Promise<{ connected: boolean; checkedAt: string }> {
-    const account = await this.getAccount(id);
-    const connected = account.connection_status === "connected" && !!account.access_token;
-    const checkedAt = new Date().toISOString();
-    await this.updateAccount(id, { last_sync_at: checkedAt });
-    return { connected, checkedAt };
+  async testConnection(
+    accountId: string,
+  ): Promise<FanvueServiceResponse<{ latencyMs: number; accountId: string }>> {
+    await mockDelay();
+    return response("Mock test connection succeeded", { latencyMs: 84, accountId });
   },
 
-  // ---------- Publishing ----------
-  buildPostPayload(input: FanvuePostPayload): FanvuePostPayload {
-    // Pure helper — formats internal content into a Fanvue-shaped payload.
-    return { ...input };
+  async publishContent(
+    payload: PublishContentPayload,
+  ): Promise<FanvueServiceResponse<{ externalPostId: string }>> {
+    await mockDelay();
+    return response("Mock content published", {
+      externalPostId: `fv_post_${payload.contentId}_${Date.now()}`,
+    });
   },
 
-  /** Mock upload — returns a fake external post ID. */
-  async uploadContent(payload: FanvuePostPayload): Promise<FanvuePublishResult> {
-    const externalPostId = `fv_mock_${payload.contentKind}_${Date.now()}`;
-    return { ok: true, externalPostId };
-  },
-
-  /**
-   * Mark a content row as published (or failed) and persist the external ID.
-   * Operates on either `images` or `videos` based on contentKind.
-   */
-  async recordPublishResult(
-    contentKind: ContentKind,
-    contentId: string,
-    result: FanvuePublishResult,
-  ) {
-    const table = contentKind === "image" ? "images" : "videos";
-    const patch = result.ok
-      ? {
-          publish_status: "published" as PublishStatus,
-          published_at: new Date().toISOString(),
-          external_post_id: result.externalPostId ?? null,
-        }
-      : { publish_status: "failed" as PublishStatus };
-
-    const { data, error } = await supabase
-      .from(table)
-      .update(patch)
-      .eq("id", contentId)
-      .select()
-      .single();
-    if (error) throw error;
-    return data;
-  },
-
-  /** End-to-end publish flow (mock). */
-  async publish(payload: FanvuePostPayload): Promise<FanvuePublishResult> {
-    const { connected } = await this.verifyConnection(payload.connectedAccountId);
-    if (!connected) {
-      const failure: FanvuePublishResult = { ok: false, error: "Account not connected" };
-      await this.recordPublishResult(payload.contentKind, payload.contentId, failure);
-      return failure;
-    }
-    const result = await this.uploadContent(this.buildPostPayload(payload));
-    await this.recordPublishResult(payload.contentKind, payload.contentId, result);
-    return result;
-  },
-
-  /** Mock sync — in production this would reconcile with Fanvue's API. */
-  async syncExternalPosts(accountId: string) {
-    await this.updateAccount(accountId, { last_sync_at: new Date().toISOString() });
-    return { synced: 0 };
-  },
-
-  async setPublishStatus(
-    contentKind: ContentKind,
-    contentId: string,
-    status: PublishStatus,
-  ) {
-    const table = contentKind === "image" ? "images" : "videos";
-    const { data, error } = await supabase
-      .from(table)
-      .update({ publish_status: status })
-      .eq("id", contentId)
-      .select()
-      .single();
-    if (error) throw error;
-    return data;
+  async retryPublication(
+    publicationId: string,
+  ): Promise<FanvueServiceResponse<{ publicationId: string }>> {
+    await mockDelay();
+    return response("Mock publication retry queued", { publicationId });
   },
 };
