@@ -323,28 +323,28 @@ function CharactersPage() {
       value: String(PROMPT_TEMPLATES.length + SCENE_TEMPLATES.length),
       hint: "Scene + prompt templates",
       icon: Layers,
-      accent: "violet" as const,
+      accent: "chart-4" as const,
     },
     {
       label: "Active Presets",
       value: String(INTENSITY_PRESETS.length),
       hint: "Intensity tiers",
       icon: Sparkles,
-      accent: "magenta" as const,
+      accent: "primary" as const,
     },
     {
       label: "Scene Categories",
       value: String(SCENE_CATEGORIES.length),
       hint: `+${FUTURE_THEMES.length} future themes`,
       icon: MapPin,
-      accent: "amber" as const,
+      accent: "chart-3" as const,
     },
     {
       label: "Voice Profile",
       value: "Pending",
       hint: "Awaiting clone upload",
       icon: Mic,
-      accent: "emerald" as const,
+      accent: "chart-5" as const,
     },
   ];
 
