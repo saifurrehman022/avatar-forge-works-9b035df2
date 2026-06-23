@@ -407,13 +407,18 @@ function SchedulePage() {
   const updateItem = (id: string, patch: Partial<ScheduledItem>) =>
     setItems((prev) => prev.map((i) => (i.id === id ? { ...i, ...patch } : i)));
 
-  const removeItem = (id: string) => {
+  const removeItem = async (id: string) => {
     setItems((prev) => prev.filter((i) => i.id !== id));
-    toast.success("Schedule removed");
     setSelected(null);
+    try {
+      const { error } = await supabase.from("schedules").delete().eq("id", id);
+      if (error) throw error;
+      toast.success("Schedule removed");
+      queryClient.invalidateQueries({ queryKey: ["schedules"] });
+    } catch (e: any) { toast.error(e?.message ?? "Failed to remove"); }
   };
 
-  const retryPublish = (id: string) => {
+  const retryPublish = async (id: string) => {
     updateItem(id, {
       status: "scheduled",
       queueStatus: "ready",
@@ -422,40 +427,37 @@ function SchedulePage() {
         { at: new Date().toISOString(), label: "Retry queued", kind: "retried" },
       ],
     });
-    toast.success("Queued for retry");
+    try {
+      await scheduleService.update(id, { status: "scheduled" });
+      toast.success("Queued for retry");
+      queryClient.invalidateQueries({ queryKey: ["schedules"] });
+    } catch (e: any) { toast.error(e?.message ?? "Failed to retry"); }
   };
 
-  const publishNow = (id: string) => {
+  const publishNow = async (id: string) => {
     const item = items.find((i) => i.id === id);
     if (!item) return;
     updateItem(id, { status: "publishing", queueStatus: "publishing" });
-    setTimeout(() => {
-      const ok = Math.random() > 0.15;
+    try {
       const now = new Date().toISOString();
-      if (ok) {
-        updateItem(id, {
-          status: "published",
-          queueStatus: "published",
-          publishedAt: now,
-          externalPostId: `fv_mock_${item.type}_${Date.now()}`,
-          history: [
-            ...item.history,
-            { at: now, label: "Published", kind: "published" },
-          ],
-        });
-        toast.success("Published to Fanvue");
-      } else {
-        updateItem(id, {
-          status: "failed",
-          queueStatus: "failed",
-          history: [
-            ...item.history,
-            { at: now, label: "Publish failed", kind: "failed" },
-          ],
-        });
-        toast.error("Publish failed");
+      const externalId = `fv_${item.type}_${Date.now()}`;
+      const table = item.type === "image" ? "images" : "videos";
+      // mark underlying media as published
+      const { data: schedRow } = await supabase.from("schedules").select("content_id").eq("id", id).single();
+      if (schedRow?.content_id) {
+        await supabase
+          .from(table)
+          .update({ publish_status: "published", published_at: now, external_post_id: externalId })
+          .eq("id", schedRow.content_id);
       }
-    }, 1200);
+      await scheduleService.update(id, { status: "published" });
+      toast.success("Published to Fanvue");
+      queryClient.invalidateQueries({ queryKey: ["schedules"] });
+    } catch (e: any) {
+      updateItem(id, { status: "failed", queueStatus: "failed" });
+      try { await scheduleService.update(id, { status: "failed" }); } catch {}
+      toast.error(e?.message ?? "Publish failed");
+    }
   };
 
   const pauseItem = (id: string) => {
@@ -466,27 +468,29 @@ function SchedulePage() {
   // ---------- Drag and drop ----------
   const [dragId, setDragId] = useState<string | null>(null);
 
-  const onDropOnDay = (day: Date) => {
+  const onDropOnDay = async (day: Date) => {
     if (!dragId) return;
     const item = items.find((i) => i.id === dragId);
     if (!item) return;
     const oldD = new Date(item.scheduledAt);
     const newD = new Date(day);
     newD.setHours(oldD.getHours(), oldD.getMinutes(), 0, 0);
+    const iso = newD.toISOString();
     updateItem(dragId, {
-      scheduledAt: newD.toISOString(),
+      scheduledAt: iso,
       history: [
         ...item.history,
-        {
-          at: new Date().toISOString(),
-          label: `Rescheduled to ${fmtDateTime(newD.toISOString())}`,
-          kind: "scheduled",
-        },
+        { at: new Date().toISOString(), label: `Rescheduled to ${fmtDateTime(iso)}`, kind: "scheduled" },
       ],
     });
-    toast.success("Schedule updated");
+    try {
+      await scheduleService.update(dragId, { publish_time: iso });
+      toast.success("Schedule updated");
+      queryClient.invalidateQueries({ queryKey: ["schedules"] });
+    } catch (e: any) { toast.error(e?.message ?? "Failed to update"); }
     setDragId(null);
   };
+
 
   return (
     <SidebarProvider>
