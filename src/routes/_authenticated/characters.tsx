@@ -838,78 +838,69 @@ function PromptLibrary({ prompts }: { prompts: PromptRow[] }) {
 }
 
 
-function PresetLibrary() {
+type PresetRow = {
+  id: string; key: string; label: string;
+  prompt_style: string | null; caption_style: string | null; negative_prompt: string | null;
+};
+
+function PresetLibrary({ presets }: { presets: PresetRow[] }) {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="font-display text-lg font-semibold">
-            Content Intensity Presets
-          </h3>
-          <p className="text-sm text-muted-foreground">
-            One-tap tone, prompt and negative-prompt bundles.
-          </p>
+          <h3 className="font-display text-lg font-semibold">Content Intensity Presets</h3>
+          <p className="text-sm text-muted-foreground">One-tap tone, prompt and negative-prompt bundles.</p>
         </div>
-        <Button size="sm" variant="outline">
+        <Button size="sm" variant="outline" disabled>
           <Plus className="mr-2 h-4 w-4" /> New preset
         </Button>
       </div>
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        {INTENSITY_PRESETS.map((p) => (
-          <Card
-            key={p.id}
-            className="border-border/60 bg-card/80"
-          >
-            <CardContent className="space-y-3 p-5">
-              <div className="flex items-center justify-between">
-                <div className="font-medium">{p.name}</div>
-                <Badge
-                  variant="outline"
-                  className={intensityBadgeClass(
-                    p.id === "weekday"
-                      ? "Edge-of-SFW"
-                      : p.id === "friday"
-                        ? "NSFW Teaser"
-                        : "PPV",
+      {presets.length === 0 ? (
+        <p className="rounded-lg border border-dashed border-border/60 bg-muted/20 p-8 text-center text-sm text-muted-foreground">
+          No intensity presets yet.
+        </p>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          {presets.map((p) => {
+            const tone =
+              p.key === "weekday" ? "Edge-of-SFW"
+              : p.key === "friday" ? "NSFW Teaser"
+              : p.key === "saturday" ? "PPV"
+              : "SFW";
+            return (
+              <Card key={p.id} className="border-border/60 bg-card/80">
+                <CardContent className="space-y-3 p-5">
+                  <div className="flex items-center justify-between">
+                    <div className="font-medium">{p.label}</div>
+                    <Badge variant="outline" className={intensityBadgeClass(tone)}>{tone}</Badge>
+                  </div>
+                  {p.prompt_style && (
+                    <div>
+                      <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">Prompt style</div>
+                      <p className="mt-1 text-xs text-foreground/80">{p.prompt_style}</p>
+                    </div>
                   )}
-                >
-                  {p.id === "weekday"
-                    ? "Edge-of-SFW"
-                    : p.id === "friday"
-                      ? "NSFW Teaser"
-                      : "PPV"}
-                </Badge>
-              </div>
-              <div>
-                <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                  Prompt style
-                </div>
-                <p className="mt-1 text-xs text-foreground/80">
-                  {p.promptStyle}
-                </p>
-              </div>
-              <div>
-                <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                  Caption style
-                </div>
-                <p className="mt-1 text-xs text-foreground/80">
-                  {p.captionStyle}
-                </p>
-              </div>
-              <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3">
-                <div className="mb-1 text-[10px] uppercase tracking-[0.18em] text-destructive/80">
-                  Negative prompt
-                </div>
-                <p className="text-[11px] text-foreground/70">
-                  {p.negativePrompt}
-                </p>
-              </div>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
+                  {p.caption_style && (
+                    <div>
+                      <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">Caption style</div>
+                      <p className="mt-1 text-xs text-foreground/80">{p.caption_style}</p>
+                    </div>
+                  )}
+                  {p.negative_prompt && (
+                    <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3">
+                      <div className="mb-1 text-[10px] uppercase tracking-[0.18em] text-destructive/80">Negative prompt</div>
+                      <p className="text-[11px] text-foreground/70">{p.negative_prompt}</p>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
+
 }
 
 function DefaultsPanel({
