@@ -1,5 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import {
+  characterProfileService,
+  type SceneRow,
+  type PromptRow,
+  type IntensityPresetRow,
+} from "@/services/characterProfileService";
 import {
   Sparkles,
   Layers,
