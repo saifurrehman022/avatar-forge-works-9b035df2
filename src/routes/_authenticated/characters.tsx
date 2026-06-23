@@ -929,7 +929,18 @@ function SceneLibrary({ scenes }: { scenes: SceneRow[] }) {
   );
 }
 
-function PromptLibrary() {
+function EmptyTemplates({ label }: { label: string }) {
+  return (
+    <Card className="col-span-full border-dashed border-border/60 bg-card/40">
+      <CardContent className="flex flex-col items-center justify-center gap-2 p-10 text-center">
+        <BookOpen className="h-6 w-6 text-muted-foreground" />
+        <p className="text-sm text-muted-foreground">{label}</p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function PromptLibrary({ prompts }: { prompts: PromptRow[] }) {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -947,41 +958,57 @@ function PromptLibrary() {
       </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {PROMPT_TEMPLATES.map((p) => (
+        {prompts.length === 0 ? (
+          <EmptyTemplates label="No prompt templates yet" />
+        ) : (
+          prompts.map((p) => (
           <Card key={p.id} className="border-border/60 bg-card/80">
             <CardContent className="space-y-3 p-5">
               <div className="flex items-start justify-between gap-2">
                 <div className="font-medium">{p.name}</div>
-                <Badge
-                  variant="outline"
-                  className={intensityBadgeClass(p.intensity)}
-                >
-                  {p.intensity}
-                </Badge>
+                {p.intensity && (
+                  <Badge
+                    variant="outline"
+                    className={intensityBadgeClass(p.intensity)}
+                  >
+                    {p.intensity}
+                  </Badge>
+                )}
               </div>
               <div className="rounded-lg border border-border/60 bg-background/40 p-3">
                 <div className="mb-1 flex items-center gap-1.5 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
                   <Wand2 className="h-3 w-3" /> Prompt template
                 </div>
-                <p className="line-clamp-3 text-xs">{p.template}</p>
+                <p className="line-clamp-3 text-xs">{p.prompt}</p>
               </div>
-              <div className="rounded-lg border border-border/60 bg-background/40 p-3">
-                <div className="mb-1 flex items-center gap-1.5 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                  <BookOpen className="h-3 w-3" /> Caption direction
+              {p.caption_direction && (
+                <div className="rounded-lg border border-border/60 bg-background/40 p-3">
+                  <div className="mb-1 flex items-center gap-1.5 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+                    <BookOpen className="h-3 w-3" /> Caption direction
+                  </div>
+                  <p className="line-clamp-2 text-xs text-muted-foreground">
+                    {p.caption_direction}
+                  </p>
                 </div>
-                <p className="line-clamp-2 text-xs text-muted-foreground">
-                  {p.caption}
-                </p>
-              </div>
+              )}
             </CardContent>
           </Card>
-        ))}
+          ))
+        )}
       </div>
     </div>
   );
 }
 
-function PresetLibrary() {
+function PresetLibrary({ presets }: { presets: IntensityPresetRow[] }) {
+  const intensityForKey = (key: string) =>
+    key === "weekday"
+      ? "Edge-of-SFW"
+      : key === "friday"
+        ? "NSFW Teaser"
+        : key === "saturday"
+          ? "PPV"
+          : "SFW";
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -998,66 +1025,59 @@ function PresetLibrary() {
         </Button>
       </div>
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        {INTENSITY_PRESETS.map((p) => (
-          <Card
-            key={p.id}
-            className="border-border/60 bg-card/80"
-          >
+        {presets.length === 0 ? (
+          <EmptyTemplates label="No intensity presets yet" />
+        ) : (
+          presets.map((p) => (
+          <Card key={p.id} className="border-border/60 bg-card/80">
             <CardContent className="space-y-3 p-5">
               <div className="flex items-center justify-between">
-                <div className="font-medium">{p.name}</div>
+                <div className="font-medium">{p.label}</div>
                 <Badge
                   variant="outline"
-                  className={intensityBadgeClass(
-                    p.id === "weekday"
-                      ? "Edge-of-SFW"
-                      : p.id === "friday"
-                        ? "NSFW Teaser"
-                        : "PPV",
-                  )}
+                  className={intensityBadgeClass(intensityForKey(p.key))}
                 >
-                  {p.id === "weekday"
-                    ? "Edge-of-SFW"
-                    : p.id === "friday"
-                      ? "NSFW Teaser"
-                      : "PPV"}
+                  {intensityForKey(p.key)}
                 </Badge>
               </div>
-              <div>
-                <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                  Prompt style
+              {p.prompt_style && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+                    Prompt style
+                  </div>
+                  <p className="mt-1 text-xs text-foreground/80">
+                    {p.prompt_style}
+                  </p>
                 </div>
-                <p className="mt-1 text-xs text-foreground/80">
-                  {p.promptStyle}
-                </p>
-              </div>
-              <div>
-                <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                  Caption style
+              )}
+              {p.caption_style && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+                    Caption style
+                  </div>
+                  <p className="mt-1 text-xs text-foreground/80">
+                    {p.caption_style}
+                  </p>
                 </div>
-                <p className="mt-1 text-xs text-foreground/80">
-                  {p.captionStyle}
-                </p>
-              </div>
-              <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3">
-                <div className="mb-1 text-[10px] uppercase tracking-[0.18em] text-destructive/80">
-                  Negative prompt
+              )}
+              {p.negative_prompt && (
+                <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3">
+                  <div className="mb-1 text-[10px] uppercase tracking-[0.18em] text-destructive/80">
+                    Negative prompt
+                  </div>
+                  <p className="text-[11px] text-foreground/70">
+                    {p.negative_prompt}
+                  </p>
                 </div>
-                <p className="text-[11px] text-foreground/70">
-                  {p.negativePrompt}
-                </p>
-              </div>
+              )}
             </CardContent>
           </Card>
-        ))}
+          ))
+        )}
       </div>
     </div>
   );
 }
-
-function DefaultsPanel({
-  defaults,
-  setDefaults,
 }: {
   defaults: {
     fps: number;
