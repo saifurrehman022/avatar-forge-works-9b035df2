@@ -710,19 +710,20 @@ function ConsistencySection() {
   );
 }
 
-function SceneLibrary() {
+type SceneRow = {
+  id: string; category: string; label: string; description: string | null;
+  intensity: string; prompt: string;
+};
+
+function SceneLibrary({ scenes }: { scenes: SceneRow[] }) {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="font-display text-lg font-semibold">
-            Scene Template Library
-          </h3>
-          <p className="text-sm text-muted-foreground">
-            Reusable environments for every drop and PPV cycle.
-          </p>
+          <h3 className="font-display text-lg font-semibold">Scene Template Library</h3>
+          <p className="text-sm text-muted-foreground">Reusable environments for every drop and PPV cycle.</p>
         </div>
-        <Button size="sm">
+        <Button size="sm" disabled>
           <Plus className="mr-2 h-4 w-4" /> New scene
         </Button>
       </div>
@@ -733,77 +734,53 @@ function SceneLibrary() {
         </div>
         <div className="flex flex-wrap gap-2">
           {SCENE_CATEGORIES.map((c) => (
-            <Badge
-              key={c.key}
-              variant="outline"
-              className="gap-1.5 border-border bg-background/40 text-foreground"
-            >
+            <Badge key={c.key} variant="outline" className="gap-1.5 border-border bg-background/40 text-foreground">
               <c.icon className="h-3 w-3 text-primary" />
               {c.label}
             </Badge>
           ))}
           {FUTURE_THEMES.map((c) => (
-            <Badge
-              key={c.key}
-              variant="outline"
-              className="gap-1.5 border-dashed border-border text-muted-foreground"
-            >
+            <Badge key={c.key} variant="outline" className="gap-1.5 border-dashed border-border text-muted-foreground">
               <c.icon className="h-3 w-3" />
               {c.label}
-              <span className="ml-1 text-[9px] uppercase tracking-wider">
-                soon
-              </span>
+              <span className="ml-1 text-[9px] uppercase tracking-wider">soon</span>
             </Badge>
           ))}
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {SCENE_TEMPLATES.map((s) => (
-          <Card
-            key={s.id}
-            className="group border-border/60 bg-card/80 transition hover:border-primary/40"
-          >
-            <CardContent className="space-y-3 p-5">
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                    {SCENE_CATEGORIES.find((c) => c.key === s.category)?.label ??
-                      s.category}
+      {scenes.length === 0 ? (
+        <p className="rounded-lg border border-dashed border-border/60 bg-muted/20 p-8 text-center text-sm text-muted-foreground">
+          No scene templates yet. They'll appear here once added to the database.
+        </p>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {scenes.map((s) => (
+            <Card key={s.id} className="group border-border/60 bg-card/80 transition hover:border-primary/40">
+              <CardContent className="space-y-3 p-5">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+                      {SCENE_CATEGORIES.find((c) => c.key === s.category)?.label ?? s.category}
+                    </div>
+                    <div className="mt-1 truncate font-medium">{s.label}</div>
                   </div>
-                  <div className="mt-1 truncate font-medium">{s.name}</div>
+                  <Badge variant="outline" className={intensityBadgeClass(s.intensity)}>{s.intensity}</Badge>
                 </div>
-                <Badge
-                  variant="outline"
-                  className={intensityBadgeClass(s.intensity)}
-                >
-                  {s.intensity}
-                </Badge>
-              </div>
-              <p className="text-xs text-muted-foreground">{s.description}</p>
-              <div className="rounded-lg border border-border/60 bg-background/40 p-3">
-                <div className="mb-1 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                  Default prompt
+                {s.description && <p className="text-xs text-muted-foreground">{s.description}</p>}
+                <div className="rounded-lg border border-border/60 bg-background/40 p-3">
+                  <div className="mb-1 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">Default prompt</div>
+                  <p className="line-clamp-3 text-xs text-foreground/80">{s.prompt}</p>
                 </div>
-                <p className="line-clamp-3 text-xs text-foreground/80">
-                  {s.prompt}
-                </p>
-              </div>
-              <div className="flex justify-end gap-1 opacity-0 transition group-hover:opacity-100">
-                <Button size="sm" variant="ghost">
-                  <Edit3 className="h-3.5 w-3.5" />
-                </Button>
-                <Button size="sm" variant="ghost">
-                  <Trash2 className="h-3.5 w-3.5" />
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
+
 
 function PromptLibrary() {
   return (
