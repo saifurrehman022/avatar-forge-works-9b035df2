@@ -16,32 +16,53 @@ export type Database = {
     Tables: {
       characters: {
         Row: {
+          biography: string | null
+          brand_hashtags: string[]
+          consistency: Json
           created_at: string
           created_by: string | null
           description: string | null
+          generation_defaults: Json
           id: string
+          memory: Json
           name: string
+          persona: Json
           personality_traits: string[]
+          reference_image_url: string | null
           reference_images: string[]
           updated_at: string
         }
         Insert: {
+          biography?: string | null
+          brand_hashtags?: string[]
+          consistency?: Json
           created_at?: string
           created_by?: string | null
           description?: string | null
+          generation_defaults?: Json
           id?: string
+          memory?: Json
           name: string
+          persona?: Json
           personality_traits?: string[]
+          reference_image_url?: string | null
           reference_images?: string[]
           updated_at?: string
         }
         Update: {
+          biography?: string | null
+          brand_hashtags?: string[]
+          consistency?: Json
           created_at?: string
           created_by?: string | null
           description?: string | null
+          generation_defaults?: Json
           id?: string
+          memory?: Json
           name?: string
+          persona?: Json
           personality_traits?: string[]
+          reference_image_url?: string | null
           reference_images?: string[]
           updated_at?: string
         }
@@ -50,11 +71,11 @@ export type Database = {
       connected_accounts: {
         Row: {
           access_token: string | null
-          account_identifier: string
           account_name: string
           connection_status: Database["public"]["Enums"]["connection_status"]
           created_at: string
           created_by: string | null
+          external_account_id: string
           id: string
           last_sync_at: string | null
           platform: Database["public"]["Enums"]["publishing_platform"]
@@ -62,11 +83,11 @@ export type Database = {
         }
         Insert: {
           access_token?: string | null
-          account_identifier: string
           account_name: string
           connection_status?: Database["public"]["Enums"]["connection_status"]
           created_at?: string
           created_by?: string | null
+          external_account_id: string
           id?: string
           last_sync_at?: string | null
           platform: Database["public"]["Enums"]["publishing_platform"]
@@ -74,11 +95,11 @@ export type Database = {
         }
         Update: {
           access_token?: string | null
-          account_identifier?: string
           account_name?: string
           connection_status?: Database["public"]["Enums"]["connection_status"]
           created_at?: string
           created_by?: string | null
+          external_account_id?: string
           id?: string
           last_sync_at?: string | null
           platform?: Database["public"]["Enums"]["publishing_platform"]
@@ -193,6 +214,59 @@ export type Database = {
           },
         ]
       }
+      intensity_presets: {
+        Row: {
+          caption_style: string | null
+          character_id: string
+          created_at: string
+          description: string | null
+          enabled: boolean
+          id: string
+          key: string
+          label: string
+          negative_prompt: string | null
+          prompt_style: string | null
+          sort_order: number
+          updated_at: string
+        }
+        Insert: {
+          caption_style?: string | null
+          character_id: string
+          created_at?: string
+          description?: string | null
+          enabled?: boolean
+          id?: string
+          key: string
+          label: string
+          negative_prompt?: string | null
+          prompt_style?: string | null
+          sort_order?: number
+          updated_at?: string
+        }
+        Update: {
+          caption_style?: string | null
+          character_id?: string
+          created_at?: string
+          description?: string | null
+          enabled?: boolean
+          id?: string
+          key?: string
+          label?: string
+          negative_prompt?: string | null
+          prompt_style?: string | null
+          sort_order?: number
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "intensity_presets_character_id_fkey"
+            columns: ["character_id"]
+            isOneToOne: false
+            referencedRelation: "characters"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       profiles: {
         Row: {
           created_at: string
@@ -216,6 +290,56 @@ export type Database = {
           updated_at?: string
         }
         Relationships: []
+      }
+      prompt_templates: {
+        Row: {
+          caption_direction: string | null
+          category: string | null
+          character_id: string
+          created_at: string
+          description: string | null
+          enabled: boolean
+          id: string
+          name: string
+          prompt: string
+          sort_order: number
+          updated_at: string
+        }
+        Insert: {
+          caption_direction?: string | null
+          category?: string | null
+          character_id: string
+          created_at?: string
+          description?: string | null
+          enabled?: boolean
+          id?: string
+          name: string
+          prompt?: string
+          sort_order?: number
+          updated_at?: string
+        }
+        Update: {
+          caption_direction?: string | null
+          category?: string | null
+          character_id?: string
+          created_at?: string
+          description?: string | null
+          enabled?: boolean
+          id?: string
+          name?: string
+          prompt?: string
+          sort_order?: number
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "prompt_templates_character_id_fkey"
+            columns: ["character_id"]
+            isOneToOne: false
+            referencedRelation: "characters"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       review_queue: {
         Row: {
@@ -252,6 +376,53 @@ export type Database = {
           updated_at?: string
         }
         Relationships: []
+      }
+      scene_templates: {
+        Row: {
+          category: string
+          character_id: string
+          created_at: string
+          enabled: boolean
+          id: string
+          intensity: string
+          label: string
+          prompt: string
+          sort_order: number
+          updated_at: string
+        }
+        Insert: {
+          category: string
+          character_id: string
+          created_at?: string
+          enabled?: boolean
+          id?: string
+          intensity?: string
+          label: string
+          prompt?: string
+          sort_order?: number
+          updated_at?: string
+        }
+        Update: {
+          category?: string
+          character_id?: string
+          created_at?: string
+          enabled?: boolean
+          id?: string
+          intensity?: string
+          label?: string
+          prompt?: string
+          sort_order?: number
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "scene_templates_character_id_fkey"
+            columns: ["character_id"]
+            isOneToOne: false
+            referencedRelation: "characters"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       schedules: {
         Row: {
