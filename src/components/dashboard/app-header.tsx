@@ -61,28 +61,30 @@ export function AppHeader() {
             <Button variant="ghost" className="ml-1 h-9 gap-2 pl-1.5 pr-2">
               <Avatar className="h-7 w-7">
                 <AvatarFallback className="bg-gradient-to-br from-primary to-chart-4 text-[11px] font-semibold text-primary-foreground">
-                  LA
+                  {initials}
                 </AvatarFallback>
               </Avatar>
-              <span className="hidden text-sm font-medium md:inline">Lila Admin</span>
+              <span className="hidden max-w-[160px] truncate text-sm font-medium md:inline">
+                {email || "Account"}
+              </span>
               <ChevronDown className="hidden h-3.5 w-3.5 text-muted-foreground md:inline" />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-56">
+          <DropdownMenuContent align="end" className="w-60">
             <DropdownMenuLabel>
               <div className="flex flex-col">
-                <span className="text-sm">Lila Admin</span>
-                <span className="text-xs font-normal text-muted-foreground">
-                  admin@lilastudio.ai
+                <span className="text-sm">Admin</span>
+                <span className="truncate text-xs font-normal text-muted-foreground">
+                  {email || "—"}
                 </span>
               </div>
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
-            <DropdownMenuItem>Profile</DropdownMenuItem>
-            <DropdownMenuItem>Workspace settings</DropdownMenuItem>
-            <DropdownMenuItem>API keys</DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem className="text-destructive focus:text-destructive">
+            <DropdownMenuItem
+              onClick={handleSignOut}
+              className="text-destructive focus:text-destructive"
+            >
+              <LogOut className="h-4 w-4" />
               Sign out
             </DropdownMenuItem>
           </DropdownMenuContent>
