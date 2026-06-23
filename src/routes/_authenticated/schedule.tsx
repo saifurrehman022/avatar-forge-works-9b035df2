@@ -74,6 +74,20 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 
+function RouteErrorBoundary({ error, reset }: { error: Error; reset: () => void }) {
+  console.error("[schedule route error]", error);
+  return (
+    <div className="flex min-h-screen flex-col items-center justify-center gap-3 bg-background px-6 text-center">
+      <h2 className="font-display text-lg font-semibold">Scheduling couldn't load</h2>
+      <p className="max-w-md text-sm text-muted-foreground">{error?.message ?? "Unknown error"}</p>
+      <div className="flex gap-2">
+        <button onClick={() => reset()} className="rounded-md border border-input bg-background px-4 py-2 text-sm">Try again</button>
+        <a href="/" className="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground">Go home</a>
+      </div>
+    </div>
+  );
+}
+
 export const Route = createFileRoute("/_authenticated/schedule")({
   head: () => ({
     meta: [
@@ -86,7 +100,9 @@ export const Route = createFileRoute("/_authenticated/schedule")({
     ],
   }),
   component: SchedulePage,
+  errorComponent: RouteErrorBoundary,
 });
+
 
 // ---------- Types ----------
 
