@@ -38,15 +38,6 @@ export const Route = createFileRoute("/_authenticated/")({
 });
 
 async function fetchDashboardStats() {
-  const count = async (
-    table: "images" | "videos" | "schedules" | "review_queue" | "generation_jobs",
-    apply?: (q: ReturnType<typeof supabase.from<typeof table>>["select"]) => void
-  ) => {
-    let q = supabase.from(table).select("*", { count: "exact", head: true });
-    void apply;
-    return q;
-  };
-
   const [imgs, vids, scheduled, pending, active] = await Promise.all([
     supabase.from("images").select("*", { count: "exact", head: true }),
     supabase.from("videos").select("*", { count: "exact", head: true }),
@@ -63,7 +54,6 @@ async function fetchDashboardStats() {
       .select("*", { count: "exact", head: true })
       .in("status", ["queued", "processing"]),
   ]);
-  void count;
   return {
     images: imgs.count ?? 0,
     videos: vids.count ?? 0,
