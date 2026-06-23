@@ -114,7 +114,7 @@ type DbReviewRow = {
   id: string;
   content_type: "image" | "video";
   content_id: string;
-  status: "pending" | "approved" | "rejected";
+  status: string;
   reviewer_id: string | null;
   reviewed_at: string | null;
   notes: string | null;
