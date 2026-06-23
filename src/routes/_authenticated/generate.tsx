@@ -154,6 +154,8 @@ function VideoGenerationTab() {
     "low quality, blurry, distorted face, extra fingers, watermark, text, logo"
   );
   const [submitting, setSubmitting] = useState(false);
+  const { data: lila } = useLila();
+  const { user } = useAuth();
 
   const addScene = () =>
     setScenes((s) => [...s, { id: newId(), prompt: "" }]);
