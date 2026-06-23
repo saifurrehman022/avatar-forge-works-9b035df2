@@ -3,7 +3,7 @@ import { useState, type FormEvent } from "react";
 import { z } from "zod";
 import { Loader2, Lock, Mail, ShieldCheck } from "lucide-react";
 
-import { supabaseAuth } from "@/integrations/supabase-external/client";
+import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -41,7 +41,7 @@ function LoginPage() {
       return;
     }
     setLoading(true);
-    const { error: err } = await supabaseAuth.auth.signInWithPassword({ email, password });
+    const { error: err } = await supabase.auth.signInWithPassword({ email, password });
     setLoading(false);
     if (err) {
       setError(err.message);

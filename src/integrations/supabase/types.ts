@@ -16,53 +16,32 @@ export type Database = {
     Tables: {
       characters: {
         Row: {
-          biography: string | null
-          brand_hashtags: string[]
-          consistency: Json
           created_at: string
           created_by: string | null
           description: string | null
-          generation_defaults: Json
           id: string
-          memory: Json
           name: string
-          persona: Json
           personality_traits: string[]
-          reference_image_url: string | null
           reference_images: string[]
           updated_at: string
         }
         Insert: {
-          biography?: string | null
-          brand_hashtags?: string[]
-          consistency?: Json
           created_at?: string
           created_by?: string | null
           description?: string | null
-          generation_defaults?: Json
           id?: string
-          memory?: Json
           name: string
-          persona?: Json
           personality_traits?: string[]
-          reference_image_url?: string | null
           reference_images?: string[]
           updated_at?: string
         }
         Update: {
-          biography?: string | null
-          brand_hashtags?: string[]
-          consistency?: Json
           created_at?: string
           created_by?: string | null
           description?: string | null
-          generation_defaults?: Json
           id?: string
-          memory?: Json
           name?: string
-          persona?: Json
           personality_traits?: string[]
-          reference_image_url?: string | null
           reference_images?: string[]
           updated_at?: string
         }
@@ -71,11 +50,11 @@ export type Database = {
       connected_accounts: {
         Row: {
           access_token: string | null
+          account_identifier: string
           account_name: string
           connection_status: Database["public"]["Enums"]["connection_status"]
           created_at: string
           created_by: string | null
-          external_account_id: string
           id: string
           last_sync_at: string | null
           platform: Database["public"]["Enums"]["publishing_platform"]
@@ -83,11 +62,11 @@ export type Database = {
         }
         Insert: {
           access_token?: string | null
+          account_identifier: string
           account_name: string
           connection_status?: Database["public"]["Enums"]["connection_status"]
           created_at?: string
           created_by?: string | null
-          external_account_id: string
           id?: string
           last_sync_at?: string | null
           platform: Database["public"]["Enums"]["publishing_platform"]
@@ -95,11 +74,11 @@ export type Database = {
         }
         Update: {
           access_token?: string | null
+          account_identifier?: string
           account_name?: string
           connection_status?: Database["public"]["Enums"]["connection_status"]
           created_at?: string
           created_by?: string | null
-          external_account_id?: string
           id?: string
           last_sync_at?: string | null
           platform?: Database["public"]["Enums"]["publishing_platform"]
@@ -214,113 +193,6 @@ export type Database = {
           },
         ]
       }
-      intensity_presets: {
-        Row: {
-          caption_style: string | null
-          character_id: string
-          created_at: string
-          description: string | null
-          enabled: boolean
-          id: string
-          key: string
-          label: string
-          negative_prompt: string | null
-          prompt_style: string | null
-          sort_order: number
-          updated_at: string
-        }
-        Insert: {
-          caption_style?: string | null
-          character_id: string
-          created_at?: string
-          description?: string | null
-          enabled?: boolean
-          id?: string
-          key: string
-          label: string
-          negative_prompt?: string | null
-          prompt_style?: string | null
-          sort_order?: number
-          updated_at?: string
-        }
-        Update: {
-          caption_style?: string | null
-          character_id?: string
-          created_at?: string
-          description?: string | null
-          enabled?: boolean
-          id?: string
-          key?: string
-          label?: string
-          negative_prompt?: string | null
-          prompt_style?: string | null
-          sort_order?: number
-          updated_at?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "intensity_presets_character_id_fkey"
-            columns: ["character_id"]
-            isOneToOne: false
-            referencedRelation: "characters"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
-      notification_settings: {
-        Row: {
-          created_at: string
-          failed_upload_browser: boolean
-          failed_upload_email: boolean
-          failed_upload_in_app: boolean
-          generation_browser: boolean
-          generation_email: boolean
-          generation_in_app: boolean
-          publishing_browser: boolean
-          publishing_email: boolean
-          publishing_in_app: boolean
-          system_alerts_browser: boolean
-          system_alerts_email: boolean
-          system_alerts_in_app: boolean
-          updated_at: string
-          user_id: string
-        }
-        Insert: {
-          created_at?: string
-          failed_upload_browser?: boolean
-          failed_upload_email?: boolean
-          failed_upload_in_app?: boolean
-          generation_browser?: boolean
-          generation_email?: boolean
-          generation_in_app?: boolean
-          publishing_browser?: boolean
-          publishing_email?: boolean
-          publishing_in_app?: boolean
-          system_alerts_browser?: boolean
-          system_alerts_email?: boolean
-          system_alerts_in_app?: boolean
-          updated_at?: string
-          user_id: string
-        }
-        Update: {
-          created_at?: string
-          failed_upload_browser?: boolean
-          failed_upload_email?: boolean
-          failed_upload_in_app?: boolean
-          generation_browser?: boolean
-          generation_email?: boolean
-          generation_in_app?: boolean
-          publishing_browser?: boolean
-          publishing_email?: boolean
-          publishing_in_app?: boolean
-          system_alerts_browser?: boolean
-          system_alerts_email?: boolean
-          system_alerts_in_app?: boolean
-          updated_at?: string
-          user_id?: string
-        }
-        Relationships: []
-      }
       profiles: {
         Row: {
           created_at: string
@@ -342,92 +214,6 @@ export type Database = {
           email?: string | null
           id?: string
           updated_at?: string
-        }
-        Relationships: []
-      }
-      prompt_templates: {
-        Row: {
-          caption_direction: string | null
-          category: string | null
-          character_id: string
-          created_at: string
-          description: string | null
-          enabled: boolean
-          id: string
-          intensity: string | null
-          name: string
-          prompt: string
-          sort_order: number
-          updated_at: string
-        }
-        Insert: {
-          caption_direction?: string | null
-          category?: string | null
-          character_id: string
-          created_at?: string
-          description?: string | null
-          enabled?: boolean
-          id?: string
-          intensity?: string | null
-          name: string
-          prompt?: string
-          sort_order?: number
-          updated_at?: string
-        }
-        Update: {
-          caption_direction?: string | null
-          category?: string | null
-          character_id?: string
-          created_at?: string
-          description?: string | null
-          enabled?: boolean
-          id?: string
-          intensity?: string | null
-          name?: string
-          prompt?: string
-          sort_order?: number
-          updated_at?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "prompt_templates_character_id_fkey"
-            columns: ["character_id"]
-            isOneToOne: false
-            referencedRelation: "characters"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
-      publishing_defaults: {
-        Row: {
-          auto_publish: boolean
-          created_at: string
-          default_category: string
-          default_price: number
-          default_visibility: string
-          updated_at: string
-          user_id: string
-          watermark_enabled: boolean
-        }
-        Insert: {
-          auto_publish?: boolean
-          created_at?: string
-          default_category?: string
-          default_price?: number
-          default_visibility?: string
-          updated_at?: string
-          user_id: string
-          watermark_enabled?: boolean
-        }
-        Update: {
-          auto_publish?: boolean
-          created_at?: string
-          default_category?: string
-          default_price?: number
-          default_visibility?: string
-          updated_at?: string
-          user_id?: string
-          watermark_enabled?: boolean
         }
         Relationships: []
       }
@@ -467,56 +253,6 @@ export type Database = {
         }
         Relationships: []
       }
-      scene_templates: {
-        Row: {
-          category: string
-          character_id: string
-          created_at: string
-          description: string | null
-          enabled: boolean
-          id: string
-          intensity: string
-          label: string
-          prompt: string
-          sort_order: number
-          updated_at: string
-        }
-        Insert: {
-          category: string
-          character_id: string
-          created_at?: string
-          description?: string | null
-          enabled?: boolean
-          id?: string
-          intensity?: string
-          label: string
-          prompt?: string
-          sort_order?: number
-          updated_at?: string
-        }
-        Update: {
-          category?: string
-          character_id?: string
-          created_at?: string
-          description?: string | null
-          enabled?: boolean
-          id?: string
-          intensity?: string
-          label?: string
-          prompt?: string
-          sort_order?: number
-          updated_at?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "scene_templates_character_id_fkey"
-            columns: ["character_id"]
-            isOneToOne: false
-            referencedRelation: "characters"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
       schedules: {
         Row: {
           content_id: string
@@ -553,33 +289,6 @@ export type Database = {
         }
         Relationships: []
       }
-      sync_settings: {
-        Row: {
-          auto_sync: boolean
-          created_at: string
-          retry_uploads: boolean
-          sync_interval_minutes: number
-          updated_at: string
-          user_id: string
-        }
-        Insert: {
-          auto_sync?: boolean
-          created_at?: string
-          retry_uploads?: boolean
-          sync_interval_minutes?: number
-          updated_at?: string
-          user_id: string
-        }
-        Update: {
-          auto_sync?: boolean
-          created_at?: string
-          retry_uploads?: boolean
-          sync_interval_minutes?: number
-          updated_at?: string
-          user_id?: string
-        }
-        Relationships: []
-      }
       user_roles: {
         Row: {
           created_at: string
@@ -597,57 +306,6 @@ export type Database = {
           created_at?: string
           id?: string
           role?: Database["public"]["Enums"]["app_role"]
-          user_id?: string
-        }
-        Relationships: []
-      }
-      user_settings_general: {
-        Row: {
-          auto_publish: boolean
-          compact_mode: boolean
-          created_at: string
-          default_fps: number
-          default_scenes: number
-          default_steps: number
-          landing_page: string
-          manual_approval: boolean
-          retain_rejected: boolean
-          retry_failed: boolean
-          store_history: boolean
-          theme: string
-          updated_at: string
-          user_id: string
-        }
-        Insert: {
-          auto_publish?: boolean
-          compact_mode?: boolean
-          created_at?: string
-          default_fps?: number
-          default_scenes?: number
-          default_steps?: number
-          landing_page?: string
-          manual_approval?: boolean
-          retain_rejected?: boolean
-          retry_failed?: boolean
-          store_history?: boolean
-          theme?: string
-          updated_at?: string
-          user_id: string
-        }
-        Update: {
-          auto_publish?: boolean
-          compact_mode?: boolean
-          created_at?: string
-          default_fps?: number
-          default_scenes?: number
-          default_steps?: number
-          landing_page?: string
-          manual_approval?: boolean
-          retain_rejected?: boolean
-          retry_failed?: boolean
-          store_history?: boolean
-          theme?: string
-          updated_at?: string
           user_id?: string
         }
         Relationships: []

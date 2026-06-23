@@ -1,11 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
-import {
-  characterProfileService,
-  type SceneRow,
-  type PromptRow,
-  type IntensityPresetRow,
-} from "@/services/characterProfileService";
+import { useState } from "react";
 import {
   Sparkles,
   Layers,
@@ -289,10 +283,6 @@ const intensityBadgeClass = (intensity: string) => {
 // ---------------- Page ----------------
 
 function CharactersPage() {
-  const [characterId, setCharacterId] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [loading, setLoading] = useState(true);
-
   const [persona, setPersona] = useState({
     traits: [...TRAITS] as string[],
     writingStyle:
@@ -327,120 +317,17 @@ function CharactersPage() {
       "LUNA LUXE — Italian fire silk lingerie line. Boston flagship. Drops every other Saturday.",
   });
 
-  const [scenes, setScenes] = useState<SceneRow[]>([]);
-  const [prompts, setPrompts] = useState<PromptRow[]>([]);
-  const [presets, setPresets] = useState<IntensityPresetRow[]>([]);
-
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        const existing = await characterProfileService.fetchProfile();
-        if (!alive) return;
-        if (existing) {
-          setCharacterId(existing.id);
-          if (existing.persona && Object.keys(existing.persona).length > 0)
-            setPersona((p) => ({ ...p, ...existing.persona }));
-          if (
-            existing.generation_defaults &&
-            Object.keys(existing.generation_defaults).length > 0
-          )
-            setDefaults((d) => ({ ...d, ...existing.generation_defaults }));
-          if (existing.memory && Object.keys(existing.memory).length > 0)
-            setMemory((m) => ({ ...m, ...existing.memory }));
-          setScenes(existing.scenes);
-          setPrompts(existing.prompts);
-          setPresets(existing.presets);
-
-          // Seed children if missing
-          if (existing.scenes.length === 0) {
-            const seeded = await characterProfileService.seedScenes(
-              existing.id,
-              SCENE_TEMPLATE_SEED,
-            );
-            if (alive) setScenes(seeded);
-          }
-          if (existing.prompts.length === 0) {
-            const seeded = await characterProfileService.seedPrompts(
-              existing.id,
-              PROMPT_TEMPLATE_SEED,
-            );
-            if (alive) setPrompts(seeded);
-          }
-          if (existing.presets.length === 0) {
-            const seeded = await characterProfileService.seedPresets(
-              existing.id,
-              INTENSITY_PRESET_SEED,
-            );
-            if (alive) setPresets(seeded);
-          }
-        } else {
-          const id = await characterProfileService.createCharacter({
-            biography: persona.description,
-            reference_image_url: lilaAsset.url,
-            brand_hashtags: HASHTAGS,
-            persona,
-            generation_defaults: defaults,
-            memory,
-          });
-          if (!alive) return;
-          setCharacterId(id);
-          const [s, p, pr] = await Promise.all([
-            characterProfileService.seedScenes(id, SCENE_TEMPLATE_SEED),
-            characterProfileService.seedPrompts(id, PROMPT_TEMPLATE_SEED),
-            characterProfileService.seedPresets(id, INTENSITY_PRESET_SEED),
-          ]);
-          if (!alive) return;
-          setScenes(s);
-          setPrompts(p);
-          setPresets(pr);
-        }
-      } catch (err) {
-        console.error("Failed to load character profile", err);
-        toast.error("Failed to load character profile");
-      } finally {
-        if (alive) setLoading(false);
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const handleSave = async () => {
-    if (!characterId) {
-      toast.error("Character not loaded yet");
-      return;
-    }
-    setSaving(true);
-    try {
-      await characterProfileService.updateCharacter(characterId, {
-        persona,
-        generation_defaults: defaults,
-        memory,
-        biography: persona.description,
-      });
-      toast.success("Character profile saved");
-    } catch (err) {
-      console.error(err);
-      toast.error("Save failed");
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const stats = [
     {
       label: "Total Templates",
-      value: String(prompts.length + scenes.length),
+      value: String(PROMPT_TEMPLATES.length + SCENE_TEMPLATES.length),
       hint: "Scene + prompt templates",
       icon: Layers,
       accent: "chart-4" as const,
     },
     {
       label: "Active Presets",
-      value: String(presets.length),
+      value: String(INTENSITY_PRESETS.length),
       hint: "Intensity tiers",
       icon: Sparkles,
       accent: "primary" as const,
@@ -488,11 +375,9 @@ function CharactersPage() {
               </Button>
               <Button
                 size="sm"
-                onClick={handleSave}
-                disabled={saving || loading || !characterId}
+                onClick={() => toast.success("Character profile saved")}
               >
-                <Save className="mr-2 h-4 w-4" />
-                {saving ? "Saving…" : "Save changes"}
+                <Save className="mr-2 h-4 w-4" /> Save changes
               </Button>
             </div>
           </header>
@@ -523,13 +408,13 @@ function CharactersPage() {
             </TabsList>
 
             <TabsContent value="scenes" className="mt-6">
-              <SceneLibrary scenes={scenes} />
+              <SceneLibrary />
             </TabsContent>
             <TabsContent value="prompts" className="mt-6">
-              <PromptLibrary prompts={prompts} />
+              <PromptLibrary />
             </TabsContent>
             <TabsContent value="presets" className="mt-6">
-              <PresetLibrary presets={presets} />
+              <PresetLibrary />
             </TabsContent>
             <TabsContent value="defaults" className="mt-6">
               <DefaultsPanel defaults={defaults} setDefaults={setDefaults} />
@@ -546,40 +431,6 @@ function CharactersPage() {
     </SidebarProvider>
   );
 }
-
-// ---------------- Seeds for first-run ----------------
-
-const SCENE_TEMPLATE_SEED: Array<Omit<SceneRow, "id">> = SCENE_TEMPLATES.map(
-  (s, idx) => ({
-    category: s.category,
-    label: s.name,
-    prompt: s.prompt,
-    intensity: s.intensity,
-    description: s.description,
-    sort_order: idx,
-  }),
-);
-
-const PROMPT_TEMPLATE_SEED: Array<Omit<PromptRow, "id">> = PROMPT_TEMPLATES.map(
-  (p, idx) => ({
-    name: p.name,
-    prompt: p.template,
-    caption_direction: p.caption,
-    intensity: p.intensity,
-    category: null,
-    sort_order: idx,
-  }),
-);
-
-const INTENSITY_PRESET_SEED: Array<Omit<IntensityPresetRow, "id">> =
-  INTENSITY_PRESETS.map((p, idx) => ({
-    key: p.id,
-    label: p.name,
-    prompt_style: p.promptStyle,
-    caption_style: p.captionStyle,
-    negative_prompt: p.negativePrompt,
-    sort_order: idx,
-  }));
 
 // ---------------- Sections ----------------
 
@@ -828,7 +679,7 @@ function ConsistencySection() {
   );
 }
 
-function SceneLibrary({ scenes }: { scenes: SceneRow[] }) {
+function SceneLibrary() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -877,10 +728,7 @@ function SceneLibrary({ scenes }: { scenes: SceneRow[] }) {
       </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {scenes.length === 0 ? (
-          <EmptyTemplates label="No scene templates yet" />
-        ) : (
-          scenes.map((s) => (
+        {SCENE_TEMPLATES.map((s) => (
           <Card
             key={s.id}
             className="group border-border/60 bg-card/80 transition hover:border-primary/40"
@@ -892,7 +740,7 @@ function SceneLibrary({ scenes }: { scenes: SceneRow[] }) {
                     {SCENE_CATEGORIES.find((c) => c.key === s.category)?.label ??
                       s.category}
                   </div>
-                  <div className="mt-1 truncate font-medium">{s.label}</div>
+                  <div className="mt-1 truncate font-medium">{s.name}</div>
                 </div>
                 <Badge
                   variant="outline"
@@ -901,9 +749,7 @@ function SceneLibrary({ scenes }: { scenes: SceneRow[] }) {
                   {s.intensity}
                 </Badge>
               </div>
-              {s.description && (
-                <p className="text-xs text-muted-foreground">{s.description}</p>
-              )}
+              <p className="text-xs text-muted-foreground">{s.description}</p>
               <div className="rounded-lg border border-border/60 bg-background/40 p-3">
                 <div className="mb-1 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
                   Default prompt
@@ -922,25 +768,13 @@ function SceneLibrary({ scenes }: { scenes: SceneRow[] }) {
               </div>
             </CardContent>
           </Card>
-          ))
-        )}
+        ))}
       </div>
     </div>
   );
 }
 
-function EmptyTemplates({ label }: { label: string }) {
-  return (
-    <Card className="col-span-full border-dashed border-border/60 bg-card/40">
-      <CardContent className="flex flex-col items-center justify-center gap-2 p-10 text-center">
-        <BookOpen className="h-6 w-6 text-muted-foreground" />
-        <p className="text-sm text-muted-foreground">{label}</p>
-      </CardContent>
-    </Card>
-  );
-}
-
-function PromptLibrary({ prompts }: { prompts: PromptRow[] }) {
+function PromptLibrary() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -958,57 +792,41 @@ function PromptLibrary({ prompts }: { prompts: PromptRow[] }) {
       </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {prompts.length === 0 ? (
-          <EmptyTemplates label="No prompt templates yet" />
-        ) : (
-          prompts.map((p) => (
+        {PROMPT_TEMPLATES.map((p) => (
           <Card key={p.id} className="border-border/60 bg-card/80">
             <CardContent className="space-y-3 p-5">
               <div className="flex items-start justify-between gap-2">
                 <div className="font-medium">{p.name}</div>
-                {p.intensity && (
-                  <Badge
-                    variant="outline"
-                    className={intensityBadgeClass(p.intensity)}
-                  >
-                    {p.intensity}
-                  </Badge>
-                )}
+                <Badge
+                  variant="outline"
+                  className={intensityBadgeClass(p.intensity)}
+                >
+                  {p.intensity}
+                </Badge>
               </div>
               <div className="rounded-lg border border-border/60 bg-background/40 p-3">
                 <div className="mb-1 flex items-center gap-1.5 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
                   <Wand2 className="h-3 w-3" /> Prompt template
                 </div>
-                <p className="line-clamp-3 text-xs">{p.prompt}</p>
+                <p className="line-clamp-3 text-xs">{p.template}</p>
               </div>
-              {p.caption_direction && (
-                <div className="rounded-lg border border-border/60 bg-background/40 p-3">
-                  <div className="mb-1 flex items-center gap-1.5 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                    <BookOpen className="h-3 w-3" /> Caption direction
-                  </div>
-                  <p className="line-clamp-2 text-xs text-muted-foreground">
-                    {p.caption_direction}
-                  </p>
+              <div className="rounded-lg border border-border/60 bg-background/40 p-3">
+                <div className="mb-1 flex items-center gap-1.5 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+                  <BookOpen className="h-3 w-3" /> Caption direction
                 </div>
-              )}
+                <p className="line-clamp-2 text-xs text-muted-foreground">
+                  {p.caption}
+                </p>
+              </div>
             </CardContent>
           </Card>
-          ))
-        )}
+        ))}
       </div>
     </div>
   );
 }
 
-function PresetLibrary({ presets }: { presets: IntensityPresetRow[] }) {
-  const intensityForKey = (key: string) =>
-    key === "weekday"
-      ? "Edge-of-SFW"
-      : key === "friday"
-        ? "NSFW Teaser"
-        : key === "saturday"
-          ? "PPV"
-          : "SFW";
+function PresetLibrary() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -1025,59 +843,63 @@ function PresetLibrary({ presets }: { presets: IntensityPresetRow[] }) {
         </Button>
       </div>
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        {presets.length === 0 ? (
-          <EmptyTemplates label="No intensity presets yet" />
-        ) : (
-          presets.map((p) => (
-          <Card key={p.id} className="border-border/60 bg-card/80">
+        {INTENSITY_PRESETS.map((p) => (
+          <Card
+            key={p.id}
+            className="border-border/60 bg-card/80"
+          >
             <CardContent className="space-y-3 p-5">
               <div className="flex items-center justify-between">
-                <div className="font-medium">{p.label}</div>
+                <div className="font-medium">{p.name}</div>
                 <Badge
                   variant="outline"
-                  className={intensityBadgeClass(intensityForKey(p.key))}
+                  className={intensityBadgeClass(
+                    p.id === "weekday"
+                      ? "Edge-of-SFW"
+                      : p.id === "friday"
+                        ? "NSFW Teaser"
+                        : "PPV",
+                  )}
                 >
-                  {intensityForKey(p.key)}
+                  {p.id === "weekday"
+                    ? "Edge-of-SFW"
+                    : p.id === "friday"
+                      ? "NSFW Teaser"
+                      : "PPV"}
                 </Badge>
               </div>
-              {p.prompt_style && (
-                <div>
-                  <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                    Prompt style
-                  </div>
-                  <p className="mt-1 text-xs text-foreground/80">
-                    {p.prompt_style}
-                  </p>
+              <div>
+                <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+                  Prompt style
                 </div>
-              )}
-              {p.caption_style && (
-                <div>
-                  <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                    Caption style
-                  </div>
-                  <p className="mt-1 text-xs text-foreground/80">
-                    {p.caption_style}
-                  </p>
+                <p className="mt-1 text-xs text-foreground/80">
+                  {p.promptStyle}
+                </p>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+                  Caption style
                 </div>
-              )}
-              {p.negative_prompt && (
-                <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3">
-                  <div className="mb-1 text-[10px] uppercase tracking-[0.18em] text-destructive/80">
-                    Negative prompt
-                  </div>
-                  <p className="text-[11px] text-foreground/70">
-                    {p.negative_prompt}
-                  </p>
+                <p className="mt-1 text-xs text-foreground/80">
+                  {p.captionStyle}
+                </p>
+              </div>
+              <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3">
+                <div className="mb-1 text-[10px] uppercase tracking-[0.18em] text-destructive/80">
+                  Negative prompt
                 </div>
-              )}
+                <p className="text-[11px] text-foreground/70">
+                  {p.negativePrompt}
+                </p>
+              </div>
             </CardContent>
           </Card>
-          ))
-        )}
+        ))}
       </div>
     </div>
   );
 }
+
 function DefaultsPanel({
   defaults,
   setDefaults,
