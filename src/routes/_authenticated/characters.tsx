@@ -877,7 +877,10 @@ function SceneLibrary({ scenes }: { scenes: SceneRow[] }) {
       </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {SCENE_TEMPLATES.map((s) => (
+        {scenes.length === 0 ? (
+          <EmptyTemplates label="No scene templates yet" />
+        ) : (
+          scenes.map((s) => (
           <Card
             key={s.id}
             className="group border-border/60 bg-card/80 transition hover:border-primary/40"
@@ -889,7 +892,7 @@ function SceneLibrary({ scenes }: { scenes: SceneRow[] }) {
                     {SCENE_CATEGORIES.find((c) => c.key === s.category)?.label ??
                       s.category}
                   </div>
-                  <div className="mt-1 truncate font-medium">{s.name}</div>
+                  <div className="mt-1 truncate font-medium">{s.label}</div>
                 </div>
                 <Badge
                   variant="outline"
@@ -898,7 +901,9 @@ function SceneLibrary({ scenes }: { scenes: SceneRow[] }) {
                   {s.intensity}
                 </Badge>
               </div>
-              <p className="text-xs text-muted-foreground">{s.description}</p>
+              {s.description && (
+                <p className="text-xs text-muted-foreground">{s.description}</p>
+              )}
               <div className="rounded-lg border border-border/60 bg-background/40 p-3">
                 <div className="mb-1 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
                   Default prompt
@@ -917,7 +922,8 @@ function SceneLibrary({ scenes }: { scenes: SceneRow[] }) {
               </div>
             </CardContent>
           </Card>
-        ))}
+          ))
+        )}
       </div>
     </div>
   );
