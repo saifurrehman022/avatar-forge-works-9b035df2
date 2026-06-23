@@ -150,57 +150,95 @@ export const fanvueServicePlaceholder = {
 // ---------------- Component ----------------
 
 function SettingsPage() {
-  // General — Appearance
-  const [theme, setTheme] = useState<"dark" | "light" | "system">("dark");
-  const [compactMode, setCompactMode] = useState(false);
-  const [landingPage, setLandingPage] = useState("/");
-
-  // General — Generation
-  const [defaultFps, setDefaultFps] = useState(16);
-  const [defaultScenes, setDefaultScenes] = useState(10);
-  const [defaultSteps, setDefaultSteps] = useState(29);
-
-  // General — Publishing
-  const [manualApproval, setManualApproval] = useState(true);
-  const [autoPublish, setAutoPublish] = useState(false);
-  const [retryFailed, setRetryFailed] = useState(true);
-
-  // General — Storage
-  const [storeHistory, setStoreHistory] = useState(true);
-  const [retainRejected, setRetainRejected] = useState(false);
-
-  // Fanvue Integration
-  const [accounts] = useState<ConnectedAccount[]>([]);
+  const [general, setGeneral] = useState<GeneralSettings>(defaultGeneral);
   const [publishingDefaults, setPublishingDefaults] =
-    useState<PublishingDefaults>({
-      defaultVisibility: "subscribers",
-      defaultCategory: "lifestyle",
-      defaultPrice: 0,
-      watermarkEnabled: true,
-      autoPublish: false,
-    });
-  const [autoSync, setAutoSync] = useState(true);
-  const [syncInterval, setSyncInterval] = useState("15");
-  const [retryUploads, setRetryUploads] = useState(true);
+    useState<PublishingDefaultsRow>(defaultPublishing);
+  const [notifications, setNotifications] =
+    useState<NotificationSettingsRow>(defaultNotifications);
+  const [sync, setSync] = useState<SyncSettingsRow>(defaultSync);
+  const [savingGeneral, setSavingGeneral] = useState(false);
+  const [savingNotif, setSavingNotif] = useState(false);
+
+  const [accounts] = useState<ConnectedAccount[]>([]);
   const [syncActivity] = useState<SyncActivity[]>([]);
 
-  // Notifications
-  const [notifications, setNotifications] = useState<NotificationSettings>({
-    generation: { email: false, browser: true, inApp: true },
-    publishing: { email: true, browser: true, inApp: true },
-    failedUpload: { email: true, browser: true, inApp: true },
-    systemAlerts: { email: true, browser: false, inApp: true },
-  });
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [g, p, n, s] = await Promise.all([
+          settingsService.getGeneral(),
+          settingsService.getPublishing(),
+          settingsService.getNotifications(),
+          settingsService.getSync(),
+        ]);
+        if (cancelled) return;
+        setGeneral(g);
+        setPublishingDefaults(p);
+        setNotifications(n);
+        setSync(s);
+      } catch (err) {
+        console.error("Failed to load settings", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const setG = <K extends keyof GeneralSettings>(k: K, v: GeneralSettings[K]) =>
+    setGeneral((p) => ({ ...p, [k]: v }));
+
+  const channelField = (
+    key: "generation" | "publishing" | "failedUpload" | "systemAlerts",
+    channel: "email" | "browser" | "inApp",
+  ): keyof NotificationSettingsRow => {
+    const keyMap = {
+      generation: "generation",
+      publishing: "publishing",
+      failedUpload: "failed_upload",
+      systemAlerts: "system_alerts",
+    } as const;
+    const chMap = { email: "email", browser: "browser", inApp: "in_app" } as const;
+    return `${keyMap[key]}_${chMap[channel]}` as keyof NotificationSettingsRow;
+  };
 
   const updateChannel = (
-    key: keyof NotificationSettings,
-    channel: keyof NotificationChannel,
+    key: "generation" | "publishing" | "failedUpload" | "systemAlerts",
+    channel: "email" | "browser" | "inApp",
     value: boolean,
-  ) =>
-    setNotifications((prev) => ({
-      ...prev,
-      [key]: { ...prev[key], [channel]: value },
-    }));
+  ) => {
+    const f = channelField(key, channel);
+    setNotifications((p) => ({ ...p, [f]: value }));
+  };
+
+  const handleSaveGeneral = async () => {
+    setSavingGeneral(true);
+    try {
+      await Promise.all([
+        settingsService.saveGeneral(general),
+        settingsService.savePublishing(publishingDefaults),
+        settingsService.saveSync(sync),
+      ]);
+      toast.success("General settings saved");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Save failed");
+    } finally {
+      setSavingGeneral(false);
+    }
+  };
+
+  const handleSaveNotifications = async () => {
+    setSavingNotif(true);
+    try {
+      await settingsService.saveNotifications(notifications);
+      toast.success("Notification preferences saved");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Save failed");
+    } finally {
+      setSavingNotif(false);
+    }
+  };
 
   return (
     <SidebarProvider>
