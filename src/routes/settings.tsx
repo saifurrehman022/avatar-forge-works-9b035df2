@@ -23,7 +23,7 @@ import { toast } from "sonner";
 import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/dashboard/app-sidebar";
 import { AppHeader } from "@/components/dashboard/app-header";
-import { DashboardCard } from "@/components/dashboard/dashboard-card";
+
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -231,7 +231,7 @@ function SettingsPage() {
 
             {/* ---------- GENERAL ---------- */}
             <TabsContent value="general" className="space-y-6">
-              <DashboardCard
+              <SectionCard
                 title="Appearance"
                 description="Visual preferences for the operator console."
                 icon={Palette}
@@ -277,9 +277,9 @@ function SettingsPage() {
                     onChange={setCompactMode}
                   />
                 </div>
-              </DashboardCard>
+              </SectionCard>
 
-              <DashboardCard
+              <SectionCard
                 title="Generation Preferences"
                 description="Defaults applied when starting a new generation job."
                 icon={Sparkles}
@@ -301,9 +301,9 @@ function SettingsPage() {
                     onChange={setDefaultSteps}
                   />
                 </div>
-              </DashboardCard>
+              </SectionCard>
 
-              <DashboardCard
+              <SectionCard
                 title="Publishing Preferences"
                 description="Govern how approved content flows to publishing."
                 icon={Send}
@@ -328,9 +328,9 @@ function SettingsPage() {
                     onChange={setRetryFailed}
                   />
                 </div>
-              </DashboardCard>
+              </SectionCard>
 
-              <DashboardCard
+              <SectionCard
                 title="Storage Preferences"
                 description="Control how long generated content is retained."
                 icon={Database}
@@ -349,7 +349,7 @@ function SettingsPage() {
                     onChange={setRetainRejected}
                   />
                 </div>
-              </DashboardCard>
+              </SectionCard>
 
               <div className="flex justify-end">
                 <Button onClick={() => toast.success("General settings saved")}>
@@ -360,7 +360,7 @@ function SettingsPage() {
 
             {/* ---------- FANVUE ---------- */}
             <TabsContent value="fanvue" className="space-y-6">
-              <DashboardCard
+              <SectionCard
                 title="Connected Accounts"
                 description="Manage Fanvue accounts used for publishing."
                 icon={Plug}
@@ -390,9 +390,9 @@ function SettingsPage() {
                     ))}
                   </div>
                 )}
-              </DashboardCard>
+              </SectionCard>
 
-              <DashboardCard
+              <SectionCard
                 title="Publishing Defaults"
                 description="Default values applied to new Fanvue posts."
                 icon={Send}
@@ -466,9 +466,9 @@ function SettingsPage() {
                     }
                   />
                 </div>
-              </DashboardCard>
+              </SectionCard>
 
-              <DashboardCard
+              <SectionCard
                 title="Sync Settings"
                 description="Control how the workspace syncs with Fanvue."
                 icon={RefreshCcw}
@@ -519,12 +519,12 @@ function SettingsPage() {
                     </div>
                   )}
                 </div>
-              </DashboardCard>
+              </SectionCard>
             </TabsContent>
 
             {/* ---------- NOTIFICATIONS ---------- */}
             <TabsContent value="notifications" className="space-y-6">
-              <DashboardCard
+              <SectionCard
                 title="Notification Preferences"
                 description="Choose how each event type reaches you."
                 icon={Bell}
@@ -581,7 +581,7 @@ function SettingsPage() {
                     </tbody>
                   </table>
                 </div>
-              </DashboardCard>
+              </SectionCard>
 
               <div className="flex justify-end">
                 <Button
@@ -627,7 +627,7 @@ function SettingsPage() {
                 />
               </div>
 
-              <DashboardCard
+              <SectionCard
                 title="Diagnostics"
                 description="Service connectivity checks. Will activate once integrations are configured."
                 icon={ShieldCheck}
@@ -642,7 +642,7 @@ function SettingsPage() {
                     Refresh service status
                   </Button>
                 </div>
-              </DashboardCard>
+              </SectionCard>
             </TabsContent>
           </Tabs>
         </main>
