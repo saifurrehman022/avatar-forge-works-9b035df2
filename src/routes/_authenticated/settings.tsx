@@ -289,8 +289,8 @@ function SettingsPage() {
                   <div className="space-y-2">
                     <Label>Theme</Label>
                     <Select
-                      value={theme}
-                      onValueChange={(v) => setTheme(v as typeof theme)}
+                      value={general.theme}
+                      onValueChange={(v) => setG("theme", v as GeneralSettings["theme"])}
                     >
                       <SelectTrigger>
                         <SelectValue />
@@ -304,7 +304,10 @@ function SettingsPage() {
                   </div>
                   <div className="space-y-2">
                     <Label>Default landing page</Label>
-                    <Select value={landingPage} onValueChange={setLandingPage}>
+                    <Select
+                      value={general.landing_page}
+                      onValueChange={(v) => setG("landing_page", v)}
+                    >
                       <SelectTrigger>
                         <SelectValue />
                       </SelectTrigger>
@@ -322,8 +325,8 @@ function SettingsPage() {
                   <ToggleRow
                     label="Compact mode"
                     description="Denser tables and cards."
-                    checked={compactMode}
-                    onChange={setCompactMode}
+                    checked={general.compact_mode}
+                    onChange={(v) => setG("compact_mode", v)}
                   />
                 </div>
               </SectionCard>
@@ -336,18 +339,18 @@ function SettingsPage() {
                 <div className="grid gap-6 md:grid-cols-3">
                   <NumberField
                     label="Default FPS"
-                    value={defaultFps}
-                    onChange={setDefaultFps}
+                    value={general.default_fps}
+                    onChange={(v) => setG("default_fps", v)}
                   />
                   <NumberField
                     label="Default scene count"
-                    value={defaultScenes}
-                    onChange={setDefaultScenes}
+                    value={general.default_scenes}
+                    onChange={(v) => setG("default_scenes", v)}
                   />
                   <NumberField
                     label="Default sampling steps"
-                    value={defaultSteps}
-                    onChange={setDefaultSteps}
+                    value={general.default_steps}
+                    onChange={(v) => setG("default_steps", v)}
                   />
                 </div>
               </SectionCard>
@@ -361,20 +364,20 @@ function SettingsPage() {
                   <ToggleRow
                     label="Manual approval required"
                     description="Block auto-publish until a human approves."
-                    checked={manualApproval}
-                    onChange={setManualApproval}
+                    checked={general.manual_approval}
+                    onChange={(v) => setG("manual_approval", v)}
                   />
                   <ToggleRow
                     label="Auto publish enabled"
                     description="Publish scheduled items automatically."
-                    checked={autoPublish}
-                    onChange={setAutoPublish}
+                    checked={general.auto_publish}
+                    onChange={(v) => setG("auto_publish", v)}
                   />
                   <ToggleRow
                     label="Retry failed publishing"
                     description="Re-attempt failed publications."
-                    checked={retryFailed}
-                    onChange={setRetryFailed}
+                    checked={general.retry_failed}
+                    onChange={(v) => setG("retry_failed", v)}
                   />
                 </div>
               </SectionCard>
@@ -388,24 +391,25 @@ function SettingsPage() {
                   <ToggleRow
                     label="Store generation history"
                     description="Persist all generation jobs and metadata."
-                    checked={storeHistory}
-                    onChange={setStoreHistory}
+                    checked={general.store_history}
+                    onChange={(v) => setG("store_history", v)}
                   />
                   <ToggleRow
                     label="Retain rejected content"
                     description="Keep rejected items for audit and re-review."
-                    checked={retainRejected}
-                    onChange={setRetainRejected}
+                    checked={general.retain_rejected}
+                    onChange={(v) => setG("retain_rejected", v)}
                   />
                 </div>
               </SectionCard>
 
               <div className="flex justify-end">
-                <Button onClick={() => toast.success("General settings saved")}>
-                  Save changes
+                <Button onClick={handleSaveGeneral} disabled={savingGeneral}>
+                  {savingGeneral ? "Saving…" : "Save changes"}
                 </Button>
               </div>
             </TabsContent>
+
 
             {/* ---------- FANVUE ---------- */}
             <TabsContent value="fanvue" className="space-y-6">
