@@ -9,180 +9,180 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as SettingsRouteImport } from './routes/settings'
-import { Route as ScheduleRouteImport } from './routes/schedule'
-import { Route as ReviewRouteImport } from './routes/review'
-import { Route as LibraryRouteImport } from './routes/library'
-import { Route as GenerateRouteImport } from './routes/generate'
-import { Route as CharactersRouteImport } from './routes/characters'
-import { Route as IndexRouteImport } from './routes/index'
+import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/index'
+import { Route as AuthenticatedSettingsRouteImport } from './routes/_authenticated/settings'
+import { Route as AuthenticatedScheduleRouteImport } from './routes/_authenticated/schedule'
+import { Route as AuthenticatedReviewRouteImport } from './routes/_authenticated/review'
+import { Route as AuthenticatedLibraryRouteImport } from './routes/_authenticated/library'
+import { Route as AuthenticatedGenerateRouteImport } from './routes/_authenticated/generate'
+import { Route as AuthenticatedCharactersRouteImport } from './routes/_authenticated/characters'
 
-const SettingsRoute = SettingsRouteImport.update({
-  id: '/settings',
+const AuthenticatedIndexRoute = AuthenticatedIndexRouteImport.update({
+  id: '/_authenticated/',
+  path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AuthenticatedSettingsRoute = AuthenticatedSettingsRouteImport.update({
+  id: '/_authenticated/settings',
   path: '/settings',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ScheduleRoute = ScheduleRouteImport.update({
-  id: '/schedule',
+const AuthenticatedScheduleRoute = AuthenticatedScheduleRouteImport.update({
+  id: '/_authenticated/schedule',
   path: '/schedule',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ReviewRoute = ReviewRouteImport.update({
-  id: '/review',
+const AuthenticatedReviewRoute = AuthenticatedReviewRouteImport.update({
+  id: '/_authenticated/review',
   path: '/review',
   getParentRoute: () => rootRouteImport,
 } as any)
-const LibraryRoute = LibraryRouteImport.update({
-  id: '/library',
+const AuthenticatedLibraryRoute = AuthenticatedLibraryRouteImport.update({
+  id: '/_authenticated/library',
   path: '/library',
   getParentRoute: () => rootRouteImport,
 } as any)
-const GenerateRoute = GenerateRouteImport.update({
-  id: '/generate',
+const AuthenticatedGenerateRoute = AuthenticatedGenerateRouteImport.update({
+  id: '/_authenticated/generate',
   path: '/generate',
   getParentRoute: () => rootRouteImport,
 } as any)
-const CharactersRoute = CharactersRouteImport.update({
-  id: '/characters',
+const AuthenticatedCharactersRoute = AuthenticatedCharactersRouteImport.update({
+  id: '/_authenticated/characters',
   path: '/characters',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const IndexRoute = IndexRouteImport.update({
-  id: '/',
-  path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
 
 export interface FileRoutesByFullPath {
-  '/': typeof IndexRoute
-  '/characters': typeof CharactersRoute
-  '/generate': typeof GenerateRoute
-  '/library': typeof LibraryRoute
-  '/review': typeof ReviewRoute
-  '/schedule': typeof ScheduleRoute
-  '/settings': typeof SettingsRoute
+  '/characters': typeof AuthenticatedCharactersRoute
+  '/generate': typeof AuthenticatedGenerateRoute
+  '/library': typeof AuthenticatedLibraryRoute
+  '/review': typeof AuthenticatedReviewRoute
+  '/schedule': typeof AuthenticatedScheduleRoute
+  '/settings': typeof AuthenticatedSettingsRoute
+  '/': typeof AuthenticatedIndexRoute
 }
 export interface FileRoutesByTo {
-  '/': typeof IndexRoute
-  '/characters': typeof CharactersRoute
-  '/generate': typeof GenerateRoute
-  '/library': typeof LibraryRoute
-  '/review': typeof ReviewRoute
-  '/schedule': typeof ScheduleRoute
-  '/settings': typeof SettingsRoute
+  '/characters': typeof AuthenticatedCharactersRoute
+  '/generate': typeof AuthenticatedGenerateRoute
+  '/library': typeof AuthenticatedLibraryRoute
+  '/review': typeof AuthenticatedReviewRoute
+  '/schedule': typeof AuthenticatedScheduleRoute
+  '/settings': typeof AuthenticatedSettingsRoute
+  '/': typeof AuthenticatedIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
-  '/': typeof IndexRoute
-  '/characters': typeof CharactersRoute
-  '/generate': typeof GenerateRoute
-  '/library': typeof LibraryRoute
-  '/review': typeof ReviewRoute
-  '/schedule': typeof ScheduleRoute
-  '/settings': typeof SettingsRoute
+  '/_authenticated/characters': typeof AuthenticatedCharactersRoute
+  '/_authenticated/generate': typeof AuthenticatedGenerateRoute
+  '/_authenticated/library': typeof AuthenticatedLibraryRoute
+  '/_authenticated/review': typeof AuthenticatedReviewRoute
+  '/_authenticated/schedule': typeof AuthenticatedScheduleRoute
+  '/_authenticated/settings': typeof AuthenticatedSettingsRoute
+  '/_authenticated/': typeof AuthenticatedIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    | '/'
     | '/characters'
     | '/generate'
     | '/library'
     | '/review'
     | '/schedule'
     | '/settings'
+    | '/'
   fileRoutesByTo: FileRoutesByTo
   to:
-    | '/'
     | '/characters'
     | '/generate'
     | '/library'
     | '/review'
     | '/schedule'
     | '/settings'
+    | '/'
   id:
     | '__root__'
-    | '/'
-    | '/characters'
-    | '/generate'
-    | '/library'
-    | '/review'
-    | '/schedule'
-    | '/settings'
+    | '/_authenticated/characters'
+    | '/_authenticated/generate'
+    | '/_authenticated/library'
+    | '/_authenticated/review'
+    | '/_authenticated/schedule'
+    | '/_authenticated/settings'
+    | '/_authenticated/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
-  IndexRoute: typeof IndexRoute
-  CharactersRoute: typeof CharactersRoute
-  GenerateRoute: typeof GenerateRoute
-  LibraryRoute: typeof LibraryRoute
-  ReviewRoute: typeof ReviewRoute
-  ScheduleRoute: typeof ScheduleRoute
-  SettingsRoute: typeof SettingsRoute
+  AuthenticatedCharactersRoute: typeof AuthenticatedCharactersRoute
+  AuthenticatedGenerateRoute: typeof AuthenticatedGenerateRoute
+  AuthenticatedLibraryRoute: typeof AuthenticatedLibraryRoute
+  AuthenticatedReviewRoute: typeof AuthenticatedReviewRoute
+  AuthenticatedScheduleRoute: typeof AuthenticatedScheduleRoute
+  AuthenticatedSettingsRoute: typeof AuthenticatedSettingsRoute
+  AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/settings': {
-      id: '/settings'
-      path: '/settings'
-      fullPath: '/settings'
-      preLoaderRoute: typeof SettingsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/schedule': {
-      id: '/schedule'
-      path: '/schedule'
-      fullPath: '/schedule'
-      preLoaderRoute: typeof ScheduleRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/review': {
-      id: '/review'
-      path: '/review'
-      fullPath: '/review'
-      preLoaderRoute: typeof ReviewRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/library': {
-      id: '/library'
-      path: '/library'
-      fullPath: '/library'
-      preLoaderRoute: typeof LibraryRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/generate': {
-      id: '/generate'
-      path: '/generate'
-      fullPath: '/generate'
-      preLoaderRoute: typeof GenerateRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/characters': {
-      id: '/characters'
-      path: '/characters'
-      fullPath: '/characters'
-      preLoaderRoute: typeof CharactersRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/': {
-      id: '/'
+    '/_authenticated/': {
+      id: '/_authenticated/'
       path: '/'
       fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
+      preLoaderRoute: typeof AuthenticatedIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_authenticated/settings': {
+      id: '/_authenticated/settings'
+      path: '/settings'
+      fullPath: '/settings'
+      preLoaderRoute: typeof AuthenticatedSettingsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_authenticated/schedule': {
+      id: '/_authenticated/schedule'
+      path: '/schedule'
+      fullPath: '/schedule'
+      preLoaderRoute: typeof AuthenticatedScheduleRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_authenticated/review': {
+      id: '/_authenticated/review'
+      path: '/review'
+      fullPath: '/review'
+      preLoaderRoute: typeof AuthenticatedReviewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_authenticated/library': {
+      id: '/_authenticated/library'
+      path: '/library'
+      fullPath: '/library'
+      preLoaderRoute: typeof AuthenticatedLibraryRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_authenticated/generate': {
+      id: '/_authenticated/generate'
+      path: '/generate'
+      fullPath: '/generate'
+      preLoaderRoute: typeof AuthenticatedGenerateRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_authenticated/characters': {
+      id: '/_authenticated/characters'
+      path: '/characters'
+      fullPath: '/characters'
+      preLoaderRoute: typeof AuthenticatedCharactersRouteImport
       parentRoute: typeof rootRouteImport
     }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
-  IndexRoute: IndexRoute,
-  CharactersRoute: CharactersRoute,
-  GenerateRoute: GenerateRoute,
-  LibraryRoute: LibraryRoute,
-  ReviewRoute: ReviewRoute,
-  ScheduleRoute: ScheduleRoute,
-  SettingsRoute: SettingsRoute,
+  AuthenticatedCharactersRoute: AuthenticatedCharactersRoute,
+  AuthenticatedGenerateRoute: AuthenticatedGenerateRoute,
+  AuthenticatedLibraryRoute: AuthenticatedLibraryRoute,
+  AuthenticatedReviewRoute: AuthenticatedReviewRoute,
+  AuthenticatedScheduleRoute: AuthenticatedScheduleRoute,
+  AuthenticatedSettingsRoute: AuthenticatedSettingsRoute,
+  AuthenticatedIndexRoute: AuthenticatedIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
