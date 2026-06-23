@@ -112,194 +112,59 @@ type ImageAsset = {
 
 type Asset = VideoAsset | ImageAsset;
 
-// ---------- Mock data ----------
+// ---------- Supabase mapping ----------
 
-const STOCK_VIDEO_THUMBS = [
-  "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=800&auto=format&fit=crop&q=70",
-  "https://images.unsplash.com/photo-1517841905240-472988babdf9?w=800&auto=format&fit=crop&q=70",
-  "https://images.unsplash.com/photo-1524504388940-b1c1722653e1?w=800&auto=format&fit=crop&q=70",
-  "https://images.unsplash.com/photo-1531746020798-e6953c6e8e04?w=800&auto=format&fit=crop&q=70",
-  "https://images.unsplash.com/photo-1488426862026-3ee34a7d66df?w=800&auto=format&fit=crop&q=70",
-  "https://images.unsplash.com/photo-1502823403499-6ccfcf4fb453?w=800&auto=format&fit=crop&q=70",
-];
+const PLACEHOLDER_THUMB =
+  "data:image/svg+xml;charset=utf-8," +
+  encodeURIComponent(
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 9'><rect width='16' height='9' fill='#1f1f29'/></svg>"
+  );
 
-const STOCK_IMAGES = [
-  "https://images.unsplash.com/photo-1529626455594-4ff0802cfb7e?w=800&auto=format&fit=crop&q=70",
-  "https://images.unsplash.com/photo-1496359392544-eb7b3b54dd97?w=800&auto=format&fit=crop&q=70",
-  "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=800&auto=format&fit=crop&q=70",
-  "https://images.unsplash.com/photo-1488716820095-cbe80883c496?w=800&auto=format&fit=crop&q=70",
-  "https://images.unsplash.com/photo-1521252659862-eec69941b071?w=800&auto=format&fit=crop&q=70",
-  "https://images.unsplash.com/photo-1492288991661-058aa541ff43?w=800&auto=format&fit=crop&q=70",
-  "https://images.unsplash.com/photo-1485875437342-9b39470b3d95?w=800&auto=format&fit=crop&q=70",
-  "https://images.unsplash.com/photo-1502323777036-f29e3972d82f?w=800&auto=format&fit=crop&q=70",
-];
+type DbImage = Awaited<ReturnType<typeof contentService.listImages>>[number];
+type DbVideo = Awaited<ReturnType<typeof contentService.listVideos>>[number];
 
-const NEG_PROMPT =
-  "lowres, blurry, distorted face, extra limbs, watermark, text, low quality, deformed hands";
+function mapStatus(row: { status: string; publish_status?: string | null }): AssetStatus {
+  if (row.publish_status === "scheduled") return "scheduled";
+  if (row.status === "approved") return "approved";
+  if (row.status === "rejected") return "rejected";
+  return "pending";
+}
 
-const MOCK_VIDEOS: VideoAsset[] = [
-  {
-    id: "v-001",
-    kind: "video",
-    title: "Tokyo Cafe — Morning Routine",
-    createdAt: "2026-06-18T09:14:00Z",
-    status: "approved",
-    thumbnail: STOCK_VIDEO_THUMBS[0],
-    referenceImage: STOCK_IMAGES[0],
-    settings: { fps: 16, framesPerScene: 257, numScenes: 10, samplingSteps: 29 },
-    scenes: [
-      "Lila walks into a sunlit Tokyo cafe, warm tones, soft bokeh.",
-      "Close-up portrait, gentle smile, natural window light.",
-      "She picks up a ceramic cup, steam rising, cinematic shallow depth.",
-      "Wide shot of cafe interior, golden hour, film grain.",
-      "Lila looks out the window, contemplative, rain on glass.",
-      "She turns to camera, soft laugh, lens flare.",
-      "Hand pours latte art into the cup, macro shot.",
-      "Lila opens a notebook, writes a few lines, cozy mood.",
-      "Reflection in the window, neon signs blurred outside.",
-      "She walks out, door bell rings, gentle slow motion.",
-    ],
-    negativePrompt: NEG_PROMPT,
-    durationSec: 160,
-  },
-  {
-    id: "v-002",
-    kind: "video",
-    title: "Seoul Rooftop — Sunset Edit",
-    createdAt: "2026-06-17T18:42:00Z",
-    status: "pending",
-    thumbnail: STOCK_VIDEO_THUMBS[1],
-    referenceImage: STOCK_IMAGES[1],
-    settings: { fps: 24, framesPerScene: 200, numScenes: 8, samplingSteps: 32 },
-    scenes: [
-      "Lila stands on a Seoul rooftop, city skyline glowing pink.",
-      "Slow camera dolly forward, wind in her hair.",
-      "She leans on the railing, soft profile shot.",
-      "Cut to wide drone shot pulling back over the city.",
-      "Sun dips behind a tower, lens flare across frame.",
-      "Lila smiles at the camera, anamorphic warmth.",
-      "Close-up on hands holding a polaroid, faded color.",
-      "She walks toward the edge, silhouette against orange sky.",
-    ],
-    negativePrompt: NEG_PROMPT,
-    durationSec: 67,
-  },
-  {
-    id: "v-003",
-    kind: "video",
-    title: "Studio Portrait Reel — V2",
-    createdAt: "2026-06-15T11:08:00Z",
-    status: "scheduled",
-    thumbnail: STOCK_VIDEO_THUMBS[2],
-    referenceImage: STOCK_IMAGES[2],
-    settings: { fps: 16, framesPerScene: 257, numScenes: 6, samplingSteps: 29 },
-    scenes: [
-      "Studio portrait, neutral background, key light from the left.",
-      "Slow turn of the head, eye contact with camera.",
-      "Outfit change cut — black turtleneck, minimal jewelry.",
-      "Close-up of eyes, catchlight, shallow depth of field.",
-      "She tucks hair behind ear, soft smile.",
-      "Final hero pose, confident, magazine-style framing.",
-    ],
-    negativePrompt: NEG_PROMPT,
-    durationSec: 96,
-  },
-  {
-    id: "v-004",
-    kind: "video",
-    title: "Beach Walk — Golden Hour",
-    createdAt: "2026-06-12T07:31:00Z",
-    status: "rejected",
-    thumbnail: STOCK_VIDEO_THUMBS[3],
-    referenceImage: STOCK_IMAGES[3],
-    settings: { fps: 16, framesPerScene: 257, numScenes: 10, samplingSteps: 29 },
-    scenes: [
-      "Lila walks barefoot along the shoreline, soft waves.",
-      "Wide shot, footprints in wet sand.",
-      "She bends down, picks up a shell, examines it.",
-      "Hair catches the wind, sun behind her.",
-      "Cut to flowing white dress detail shot.",
-      "She turns and smiles, warm backlight.",
-      "Aerial pull-back revealing empty beach.",
-      "Close-up, salt water droplets on skin.",
-      "She writes her name in the sand with a stick.",
-      "Final wide, walking toward horizon.",
-    ],
-    negativePrompt: NEG_PROMPT,
-    durationSec: 160,
-  },
-  {
-    id: "v-005",
-    kind: "video",
-    title: "Late Night Diner — Neon",
-    createdAt: "2026-06-10T22:55:00Z",
-    status: "approved",
-    thumbnail: STOCK_VIDEO_THUMBS[4],
-    referenceImage: STOCK_IMAGES[4],
-    settings: { fps: 24, framesPerScene: 220, numScenes: 7, samplingSteps: 30 },
-    scenes: [
-      "Lila sits in a vinyl booth, magenta neon glow on her face.",
-      "She stirs coffee, steam rising, slow motion.",
-      "Across the diner, a jukebox glows blue.",
-      "She glances out the rain-streaked window.",
-      "Close-up of fries and a milkshake on the table.",
-      "She laughs at something off-camera, candid framing.",
-      "Wide shot, lonely diner at 2am, cinematic.",
-    ],
-    negativePrompt: NEG_PROMPT,
-    durationSec: 64,
-  },
-  {
-    id: "v-006",
-    kind: "video",
-    title: "Park Bench — Autumn Mood",
-    createdAt: "2026-06-08T14:20:00Z",
-    status: "pending",
-    thumbnail: STOCK_VIDEO_THUMBS[5],
-    referenceImage: STOCK_IMAGES[5],
-    settings: { fps: 16, framesPerScene: 257, numScenes: 9, samplingSteps: 29 },
-    scenes: [
-      "Lila sits on a park bench, golden leaves falling.",
-      "Wide shot of an empty autumn path, dappled light.",
-      "She reads a paperback, soft focus background.",
-      "Close-up of leaves drifting past her face.",
-      "She looks up, catches a leaf in her hand.",
-      "Cut to wide tracking shot as she walks the path.",
-      "Camera tilts up to bare branches and pale sky.",
-      "She zips up her coat, breath visible in the cold.",
-      "Final shot, she disappears into golden fog.",
-    ],
-    negativePrompt: NEG_PROMPT,
-    durationSec: 135,
-  },
-];
+function mapImage(row: DbImage): ImageAsset {
+  return {
+    id: row.id,
+    kind: "image",
+    title: (row.prompt ?? "Untitled image").slice(0, 60),
+    createdAt: row.created_at,
+    status: mapStatus(row),
+    thumbnail: row.image_url || PLACEHOLDER_THUMB,
+    prompt: row.prompt ?? "",
+    negativePrompt: "",
+    width: 1024,
+    height: 1536,
+    samplingSteps: 0,
+  };
+}
 
-const IMAGE_PROMPTS = [
-  "Lila in a minimalist Tokyo apartment, soft window light, film look.",
-  "High-fashion editorial portrait, cream background, sharp catchlight.",
-  "Lila on a Lisbon street, pastel buildings, mid-afternoon sun.",
-  "Cozy library setting, warm tungsten light, candid reading pose.",
-  "Outdoor café in Paris, espresso cup, soft bokeh of bicycles behind.",
-  "Studio beauty shot, gradient grey backdrop, glossy makeup.",
-  "Rainy Seoul night, umbrella, neon reflections on pavement.",
-  "Sunlit kitchen, baking cookies, candid laugh, lifestyle aesthetic.",
-];
+function mapVideo(row: DbVideo): VideoAsset {
+  const scenes = Array.isArray(row.scene_prompts)
+    ? (row.scene_prompts as unknown[]).map(String)
+    : [];
+  return {
+    id: row.id,
+    kind: "video",
+    title: (row.prompt ?? "Untitled video").slice(0, 60),
+    createdAt: row.created_at,
+    status: mapStatus(row),
+    thumbnail: row.video_url || PLACEHOLDER_THUMB,
+    referenceImage: PLACEHOLDER_THUMB,
+    settings: { fps: 16, framesPerScene: 257, numScenes: scenes.length, samplingSteps: 29 },
+    scenes,
+    negativePrompt: "",
+    durationSec: 0,
+  };
+}
 
-const MOCK_IMAGES: ImageAsset[] = STOCK_IMAGES.map((src, i) => ({
-  id: `i-${String(i + 1).padStart(3, "0")}`,
-  kind: "image" as const,
-  title: `Lila — Set ${i + 1}`,
-  createdAt: new Date(2026, 5, 18 - i, 10 + i, 12).toISOString(),
-  status: (["approved", "pending", "scheduled", "rejected"] as AssetStatus[])[
-    i % 4
-  ],
-  thumbnail: src,
-  prompt: IMAGE_PROMPTS[i % IMAGE_PROMPTS.length],
-  negativePrompt: NEG_PROMPT,
-  width: 1024,
-  height: 1536,
-  samplingSteps: 32,
-}));
 
 // ---------- Helpers ----------
 
