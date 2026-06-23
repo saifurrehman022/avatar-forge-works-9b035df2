@@ -291,7 +291,10 @@ const intensityBadgeClass = (intensity: string) => {
 // ---------------- Page ----------------
 
 function CharactersPage() {
-  const [persona, setPersona] = useState({
+  const { data: lila } = useLila();
+  const queryClient = useQueryClient();
+
+  const DEFAULT_PERSONA = {
     traits: [...TRAITS] as string[],
     writingStyle:
       "First-person, sensory, Italian-tinged. Short flirtatious lines mixed with longer poetic beats. Never desperate.",
@@ -300,60 +303,99 @@ function CharactersPage() {
     brandVoice:
       "LUNA LUXE — Italian fire meets Boston loft. Luxury lingerie lifestyle. Brand always feels like Lila's world.",
     description:
-      "Lila is a 28-year-old Italian-born creative director living in a Boston loft with Apollo, her yellow lab. She built LUNA LUXE from a silk-sketching obsession into a cult luxury lingerie label. Online she's the warm, flirtatious girlfriend who lets you into her world — espresso mornings, silk evenings, and Saturday rituals.",
+      lila?.description ??
+      "Lila is a 28-year-old Italian-born creative director living in a Boston loft with Apollo, her yellow lab.",
+  };
+  const DEFAULT_DEFAULTS = {
+    fps: 16, framesPerScene: 257, samplingSteps: 29, sceneCount: 10,
+    negativePrompt: "deformed face, extra fingers, plastic skin, identity drift, watermark, low quality, blurry, distorted anatomy",
+  };
+  const DEFAULT_MEMORY = {
+    locations: "", themes: "", lifestyle: "", pet: "", brand: "",
+  };
+
+  const [persona, setPersona] = useState(DEFAULT_PERSONA);
+  const [defaults, setDefaults] = useState(DEFAULT_DEFAULTS);
+  const [memory, setMemory] = useState(DEFAULT_MEMORY);
+
+  // Hydrate from Supabase when Lila loads
+  useEffect(() => {
+    if (!lila) return;
+    const p = (lila.persona as any) ?? {};
+    setPersona({
+      traits: (lila.personality_traits?.length ? lila.personality_traits : TRAITS) as string[],
+      writingStyle: p.writingStyle ?? DEFAULT_PERSONA.writingStyle,
+      captionTone: p.captionTone ?? DEFAULT_PERSONA.captionTone,
+      brandVoice: p.brandVoice ?? DEFAULT_PERSONA.brandVoice,
+      description: lila.description ?? DEFAULT_PERSONA.description,
+    });
+    const d = (lila.generation_defaults as any) ?? {};
+    setDefaults({
+      fps: d.fps ?? 16,
+      framesPerScene: d.framesPerScene ?? 257,
+      samplingSteps: d.samplingSteps ?? 29,
+      sceneCount: d.numScenes ?? d.sceneCount ?? 10,
+      negativePrompt: d.negativePrompt ?? DEFAULT_DEFAULTS.negativePrompt,
+    });
+    const m = (lila.memory as any) ?? {};
+    setMemory({
+      locations: m.locations ?? "",
+      themes: m.themes ?? "",
+      lifestyle: m.lifestyle ?? "",
+      pet: m.pet ?? "",
+      brand: m.brand ?? "",
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lila?.id]);
+
+  const characterId = lila?.id;
+
+  const { data: scenes = [] } = useQuery({
+    queryKey: ["scene-templates", characterId],
+    queryFn: () => sceneTemplateService.list(characterId!),
+    enabled: !!characterId,
+  });
+  const { data: prompts = [] } = useQuery({
+    queryKey: ["prompt-templates", characterId],
+    queryFn: () => promptTemplateService.list(characterId!),
+    enabled: !!characterId,
+  });
+  const { data: presets = [] } = useQuery({
+    queryKey: ["intensity-presets", characterId],
+    queryFn: () => intensityPresetService.list(characterId!),
+    enabled: !!characterId,
   });
 
-  const [defaults, setDefaults] = useState({
-    fps: 16,
-    framesPerScene: 257,
-    samplingSteps: 29,
-    sceneCount: 10,
-    negativePrompt:
-      "deformed face, extra fingers, plastic skin, identity drift, watermark, low quality, blurry, distorted anatomy",
-  });
-
-  const [memory, setMemory] = useState({
-    locations:
-      "Boston loft (primary), LUNA LUXE atelier, North End espresso bar, Public Garden, brownstone steps at sunset.",
-    themes:
-      "Espresso mornings, silk evenings, Saturday rituals, behind-the-scenes at LUNA LUXE, soft Italian nostalgia.",
-    lifestyle:
-      "Trains 5x/week pilates, reads in bed, hosts intimate dinners, collects vintage gold jewelry.",
-    pet:
-      "Apollo — yellow lab, 4 years old, sleeps at her feet, frequent supporting character in lifestyle shoots.",
-    brand:
-      "LUNA LUXE — Italian fire silk lingerie line. Boston flagship. Drops every other Saturday.",
-  });
+  const saveCharacter = async () => {
+    if (!characterId) { toast.error("Lila character not loaded yet"); return; }
+    try {
+      await characterService.update(characterId, {
+        description: persona.description,
+        personality_traits: persona.traits,
+        persona: {
+          writingStyle: persona.writingStyle,
+          captionTone: persona.captionTone,
+          brandVoice: persona.brandVoice,
+        } as any,
+        generation_defaults: {
+          fps: defaults.fps,
+          framesPerScene: defaults.framesPerScene,
+          samplingSteps: defaults.samplingSteps,
+          numScenes: defaults.sceneCount,
+          negativePrompt: defaults.negativePrompt,
+        } as any,
+        memory: memory as any,
+      });
+      toast.success("Character profile saved");
+      queryClient.invalidateQueries({ queryKey: ["character", "lila"] });
+    } catch (e: any) { toast.error(e?.message ?? "Failed to save"); }
+  };
 
   const stats = [
-    {
-      label: "Total Templates",
-      value: String(PROMPT_TEMPLATES.length + SCENE_TEMPLATES.length),
-      hint: "Scene + prompt templates",
-      icon: Layers,
-      accent: "chart-4" as const,
-    },
-    {
-      label: "Active Presets",
-      value: String(INTENSITY_PRESETS.length),
-      hint: "Intensity tiers",
-      icon: Sparkles,
-      accent: "primary" as const,
-    },
-    {
-      label: "Scene Categories",
-      value: String(SCENE_CATEGORIES.length),
-      hint: `+${FUTURE_THEMES.length} future themes`,
-      icon: MapPin,
-      accent: "chart-3" as const,
-    },
-    {
-      label: "Voice Profile",
-      value: "Pending",
-      hint: "Awaiting clone upload",
-      icon: Mic,
-      accent: "chart-5" as const,
-    },
+    { label: "Scene Templates", value: String(scenes.length), hint: "in library", icon: Layers, accent: "chart-4" as const },
+    { label: "Prompt Templates", value: String(prompts.length), hint: "ready to fire", icon: Sparkles, accent: "primary" as const },
+    { label: "Intensity Presets", value: String(presets.length), hint: "Tones bundled", icon: MapPin, accent: "chart-3" as const },
+    { label: "Voice Profile", value: "Pending", hint: "Awaiting clone upload", icon: Mic, accent: "chart-5" as const },
   ];
 
   return (
@@ -362,7 +404,6 @@ function CharactersPage() {
       <SidebarInset className="bg-aurora">
         <AppHeader />
         <main className="flex-1 space-y-8 p-4 md:p-8">
-          {/* Header */}
           <header className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 sm:flex sm:flex-wrap sm:justify-between">
             <div className="min-w-0">
               <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-muted-foreground">
@@ -373,40 +414,27 @@ function CharactersPage() {
                 Character Manager
               </h1>
               <p className="mt-1 text-sm text-muted-foreground">
-                Persona, identity, scene library and generation defaults for
-                Lila.
+                Persona, identity, scene library and generation defaults for Lila.
               </p>
             </div>
             <div className="flex shrink-0 items-center gap-2">
-              <Button variant="outline" size="sm">
-                <Edit3 className="mr-2 h-4 w-4" /> Edit persona
-              </Button>
-              <Button
-                size="sm"
-                onClick={() => toast.success("Character profile saved")}
-              >
+              <Button size="sm" onClick={saveCharacter}>
                 <Save className="mr-2 h-4 w-4" /> Save changes
               </Button>
             </div>
           </header>
 
-          {/* Stats */}
           <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            {stats.map((s) => (
-              <DashboardCard key={s.label} {...s} />
-            ))}
+            {stats.map((s) => (<DashboardCard key={s.label} {...s} />))}
           </section>
 
-          {/* Identity */}
           <IdentitySection />
 
-          {/* Persona + Consistency */}
           <div className="grid grid-cols-1 gap-6 xl:grid-cols-[2fr_1fr]">
             <PersonaSection persona={persona} setPersona={setPersona} />
             <ConsistencySection />
           </div>
 
-          {/* Tabs: scenes / prompts / presets / defaults */}
           <Tabs defaultValue="scenes" className="w-full">
             <TabsList className="bg-card/60">
               <TabsTrigger value="scenes">Scene Library</TabsTrigger>
@@ -415,21 +443,14 @@ function CharactersPage() {
               <TabsTrigger value="defaults">Generation Defaults</TabsTrigger>
             </TabsList>
 
-            <TabsContent value="scenes" className="mt-6">
-              <SceneLibrary />
-            </TabsContent>
-            <TabsContent value="prompts" className="mt-6">
-              <PromptLibrary />
-            </TabsContent>
-            <TabsContent value="presets" className="mt-6">
-              <PresetLibrary />
-            </TabsContent>
+            <TabsContent value="scenes" className="mt-6"><SceneLibrary scenes={scenes} /></TabsContent>
+            <TabsContent value="prompts" className="mt-6"><PromptLibrary prompts={prompts} /></TabsContent>
+            <TabsContent value="presets" className="mt-6"><PresetLibrary presets={presets} /></TabsContent>
             <TabsContent value="defaults" className="mt-6">
               <DefaultsPanel defaults={defaults} setDefaults={setDefaults} />
             </TabsContent>
           </Tabs>
 
-          {/* Voice (future) + Memory */}
           <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1fr_1fr]">
             <VoiceProfileSection />
             <MemorySection memory={memory} setMemory={setMemory} />
@@ -439,6 +460,8 @@ function CharactersPage() {
     </SidebarProvider>
   );
 }
+
+
 
 // ---------------- Sections ----------------
 
