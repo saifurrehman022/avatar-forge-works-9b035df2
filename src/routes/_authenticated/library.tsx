@@ -259,8 +259,47 @@ function LibraryPage() {
   const [sort, setSort] = useState<Sort>("newest");
   const [selected, setSelected] = useState<Asset | null>(null);
 
-  const [videos, setVideos] = useState<VideoAsset[]>(MOCK_VIDEOS);
-  const [images, setImages] = useState<ImageAsset[]>(MOCK_IMAGES);
+  const qc = useQueryClient();
+
+  const imagesQuery = useQuery({
+    queryKey: ["library", "images"],
+    queryFn: () => contentService.listImages(),
+    staleTime: 15_000,
+  });
+  const videosQuery = useQuery({
+    queryKey: ["library", "videos"],
+    queryFn: () => contentService.listVideos(),
+    staleTime: 15_000,
+  });
+
+  const images: ImageAsset[] = useMemo(
+    () => (imagesQuery.data ?? []).map(mapImage),
+    [imagesQuery.data]
+  );
+  const videos: VideoAsset[] = useMemo(
+    () => (videosQuery.data ?? []).map(mapVideo),
+    [videosQuery.data]
+  );
+
+  // Realtime updates
+  useEffect(() => {
+    const channel = supabase
+      .channel("library-changes")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "images" },
+        () => qc.invalidateQueries({ queryKey: ["library", "images"] })
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "videos" },
+        () => qc.invalidateQueries({ queryKey: ["library", "videos"] })
+      )
+      .subscribe();
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [qc]);
 
   const stats = useMemo(() => {
     const all: Asset[] = [...videos, ...images];
@@ -301,23 +340,33 @@ function LibraryPage() {
     return sortAssets(items, sort);
   }, [images, query, statusFilter, dateRange, sort]);
 
-  const updateStatus = (asset: Asset, status: AssetStatus) => {
-    if (asset.kind === "video") {
-      setVideos((v) =>
-        v.map((x) => (x.id === asset.id ? { ...x, status } : x)),
-      );
-    } else {
-      setImages((v) =>
-        v.map((x) => (x.id === asset.id ? { ...x, status } : x)),
-      );
+  const persistStatus = async (asset: Asset, status: AssetStatus) => {
+    try {
+      if (status === "scheduled") {
+        const patch = { publish_status: "scheduled" as const };
+        if (asset.kind === "video") await contentService.updateVideo(asset.id, patch);
+        else await contentService.updateImage(asset.id, patch);
+      } else {
+        const patch = { status };
+        if (asset.kind === "video") await contentService.updateVideo(asset.id, patch);
+        else await contentService.updateImage(asset.id, patch);
+      }
+      qc.invalidateQueries({ queryKey: ["library"] });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Update failed");
     }
   };
 
-  const deleteAsset = (asset: Asset) => {
-    if (asset.kind === "video")
-      setVideos((v) => v.filter((x) => x.id !== asset.id));
-    else setImages((v) => v.filter((x) => x.id !== asset.id));
-    toast.success(`Deleted "${asset.title}"`);
+  const deleteAsset = async (asset: Asset) => {
+    try {
+      const table = asset.kind === "video" ? "videos" : "images";
+      const { error } = await supabase.from(table).delete().eq("id", asset.id);
+      if (error) throw error;
+      toast.success(`Deleted "${asset.title}"`);
+      qc.invalidateQueries({ queryKey: ["library"] });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Delete failed");
+    }
   };
 
   const handleAction = (asset: Asset, action: string) => {
@@ -326,11 +375,11 @@ function LibraryPage() {
         setSelected(asset);
         break;
       case "review":
-        updateStatus(asset, "pending");
+        persistStatus(asset, "pending");
         toast.success(`Sent "${asset.title}" to review`);
         break;
       case "schedule":
-        updateStatus(asset, "scheduled");
+        persistStatus(asset, "scheduled");
         toast.success(`Scheduled "${asset.title}"`);
         break;
       case "delete":
