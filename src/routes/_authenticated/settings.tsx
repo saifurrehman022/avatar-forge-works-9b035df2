@@ -1,5 +1,16 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import {
+  settingsService,
+  defaultGeneral,
+  defaultPublishing,
+  defaultNotifications,
+  defaultSync,
+  type GeneralSettings,
+  type PublishingDefaultsRow,
+  type NotificationSettingsRow,
+  type SyncSettingsRow,
+} from "@/services/settingsService";
 import {
   Settings as SettingsIcon,
   Palette,
