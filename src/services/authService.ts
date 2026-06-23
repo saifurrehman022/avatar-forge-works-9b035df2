@@ -1,29 +1,29 @@
-import { supabase } from "@/integrations/supabase/client";
+import { supabaseAuth } from "@/integrations/supabase-external/client";
 
 export const authService = {
   async signIn(email: string, password: string) {
-    return supabase.auth.signInWithPassword({ email, password });
+    return supabaseAuth.auth.signInWithPassword({ email, password });
   },
 
   async signOut() {
-    return supabase.auth.signOut();
+    return supabaseAuth.auth.signOut();
   },
 
   async getUser() {
-    const { data, error } = await supabase.auth.getUser();
+    const { data, error } = await supabaseAuth.auth.getUser();
     if (error) throw error;
     return data.user;
   },
 
   async getSession() {
-    const { data } = await supabase.auth.getSession();
+    const { data } = await supabaseAuth.auth.getSession();
     return data.session;
   },
 
   async isAdmin(): Promise<boolean> {
-    const { data: userData } = await supabase.auth.getUser();
+    const { data: userData } = await supabaseAuth.auth.getUser();
     if (!userData.user) return false;
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAuth
       .from("user_roles")
       .select("role")
       .eq("user_id", userData.user.id)
@@ -33,7 +33,7 @@ export const authService = {
     return !!data;
   },
 
-  onAuthStateChange(cb: Parameters<typeof supabase.auth.onAuthStateChange>[0]) {
-    return supabase.auth.onAuthStateChange(cb);
+  onAuthStateChange(cb: Parameters<typeof supabaseAuth.auth.onAuthStateChange>[0]) {
+    return supabaseAuth.auth.onAuthStateChange(cb);
   },
 };

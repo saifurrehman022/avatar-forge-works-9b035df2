@@ -2,7 +2,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState, type FormEvent } from "react";
 import { Loader2, Lock } from "lucide-react";
 
-import { supabase } from "@/integrations/supabase/client";
+import { supabaseAuth } from "@/integrations/supabase-external/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -33,7 +33,7 @@ function ResetPasswordPage() {
       return;
     }
     setLoading(true);
-    const { error: err } = await supabase.auth.updateUser({ password });
+    const { error: err } = await supabaseAuth.auth.updateUser({ password });
     setLoading(false);
     if (err) {
       setError(err.message);
