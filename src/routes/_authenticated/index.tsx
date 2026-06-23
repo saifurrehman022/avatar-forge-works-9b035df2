@@ -6,6 +6,7 @@ import {
   ClipboardCheck,
   Cpu,
 } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 
 import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/dashboard/app-sidebar";
@@ -14,6 +15,7 @@ import { DashboardCard } from "@/components/dashboard/dashboard-card";
 import { ActivityFeed } from "@/components/dashboard/activity-feed";
 import { ScheduleWidget } from "@/components/dashboard/schedule-widget";
 import { QuickActions } from "@/components/dashboard/quick-actions";
+import { supabase } from "@/integrations/supabase/client";
 
 export const Route = createFileRoute("/_authenticated/")({
   head: () => ({
@@ -35,7 +37,51 @@ export const Route = createFileRoute("/_authenticated/")({
   component: DashboardPage,
 });
 
+async function fetchDashboardStats() {
+  const count = async (
+    table: "images" | "videos" | "schedules" | "review_queue" | "generation_jobs",
+    apply?: (q: ReturnType<typeof supabase.from<typeof table>>["select"]) => void
+  ) => {
+    let q = supabase.from(table).select("*", { count: "exact", head: true });
+    void apply;
+    return q;
+  };
+
+  const [imgs, vids, scheduled, pending, active] = await Promise.all([
+    supabase.from("images").select("*", { count: "exact", head: true }),
+    supabase.from("videos").select("*", { count: "exact", head: true }),
+    supabase
+      .from("schedules")
+      .select("*", { count: "exact", head: true })
+      .eq("status", "scheduled"),
+    supabase
+      .from("review_queue")
+      .select("*", { count: "exact", head: true })
+      .eq("status", "pending"),
+    supabase
+      .from("generation_jobs")
+      .select("*", { count: "exact", head: true })
+      .in("status", ["queued", "processing"]),
+  ]);
+  void count;
+  return {
+    images: imgs.count ?? 0,
+    videos: vids.count ?? 0,
+    scheduled: scheduled.count ?? 0,
+    pending: pending.count ?? 0,
+    active: active.count ?? 0,
+  };
+}
+
 function DashboardPage() {
+  const { data } = useQuery({
+    queryKey: ["dashboard", "stats"],
+    queryFn: fetchDashboardStats,
+    staleTime: 30_000,
+  });
+
+  const stats = data ?? { images: 0, videos: 0, scheduled: 0, pending: 0, active: 0 };
+
   return (
     <SidebarProvider>
       <div className="flex min-h-screen w-full bg-background text-foreground">
@@ -70,39 +116,36 @@ function DashboardPage() {
                 <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
                   <DashboardCard
                     label="Images generated"
-                    value="2,481"
-                    delta={12.4}
-                    hint="vs last week"
+                    value={String(stats.images)}
+                    hint="all time"
                     icon={ImageIcon}
                     accent="chart-2"
                   />
                   <DashboardCard
                     label="Videos generated"
-                    value="318"
-                    delta={8.1}
-                    hint="vs last week"
+                    value={String(stats.videos)}
+                    hint="all time"
                     icon={Video}
                     accent="primary"
                   />
                   <DashboardCard
                     label="Scheduled posts"
-                    value="46"
-                    delta={-3.2}
-                    hint="next 7 days"
+                    value={String(stats.scheduled)}
+                    hint="upcoming"
                     icon={CalendarClock}
                     accent="chart-4"
                   />
                   <DashboardCard
                     label="Pending reviews"
-                    value="12"
+                    value={String(stats.pending)}
                     hint="awaiting approval"
                     icon={ClipboardCheck}
                     accent="chart-3"
                   />
                   <DashboardCard
                     label="Active jobs"
-                    value="7"
-                    hint="2 queued · 5 running"
+                    value={String(stats.active)}
+                    hint="queued or processing"
                     icon={Cpu}
                     accent="chart-5"
                   />
