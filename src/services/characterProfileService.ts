@@ -139,9 +139,9 @@ export const characterProfileService = {
         biography: input.biography,
         reference_image_url: input.reference_image_url,
         brand_hashtags: input.brand_hashtags,
-        persona: input.persona as unknown as Record<string, unknown>,
-        generation_defaults: input.generation_defaults as unknown as Record<string, unknown>,
-        memory: input.memory as unknown as Record<string, unknown>,
+        persona: input.persona as never,
+        generation_defaults: input.generation_defaults as never,
+        memory: input.memory as never,
       })
       .select("id")
       .single();
