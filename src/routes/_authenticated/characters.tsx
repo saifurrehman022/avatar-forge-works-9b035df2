@@ -289,6 +289,10 @@ const intensityBadgeClass = (intensity: string) => {
 // ---------------- Page ----------------
 
 function CharactersPage() {
+  const [characterId, setCharacterId] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(true);
+
   const [persona, setPersona] = useState({
     traits: [...TRAITS] as string[],
     writingStyle:
@@ -323,17 +327,120 @@ function CharactersPage() {
       "LUNA LUXE — Italian fire silk lingerie line. Boston flagship. Drops every other Saturday.",
   });
 
+  const [scenes, setScenes] = useState<SceneRow[]>([]);
+  const [prompts, setPrompts] = useState<PromptRow[]>([]);
+  const [presets, setPresets] = useState<IntensityPresetRow[]>([]);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const existing = await characterProfileService.fetchProfile();
+        if (!alive) return;
+        if (existing) {
+          setCharacterId(existing.id);
+          if (existing.persona && Object.keys(existing.persona).length > 0)
+            setPersona((p) => ({ ...p, ...existing.persona }));
+          if (
+            existing.generation_defaults &&
+            Object.keys(existing.generation_defaults).length > 0
+          )
+            setDefaults((d) => ({ ...d, ...existing.generation_defaults }));
+          if (existing.memory && Object.keys(existing.memory).length > 0)
+            setMemory((m) => ({ ...m, ...existing.memory }));
+          setScenes(existing.scenes);
+          setPrompts(existing.prompts);
+          setPresets(existing.presets);
+
+          // Seed children if missing
+          if (existing.scenes.length === 0) {
+            const seeded = await characterProfileService.seedScenes(
+              existing.id,
+              SCENE_TEMPLATE_SEED,
+            );
+            if (alive) setScenes(seeded);
+          }
+          if (existing.prompts.length === 0) {
+            const seeded = await characterProfileService.seedPrompts(
+              existing.id,
+              PROMPT_TEMPLATE_SEED,
+            );
+            if (alive) setPrompts(seeded);
+          }
+          if (existing.presets.length === 0) {
+            const seeded = await characterProfileService.seedPresets(
+              existing.id,
+              INTENSITY_PRESET_SEED,
+            );
+            if (alive) setPresets(seeded);
+          }
+        } else {
+          const id = await characterProfileService.createCharacter({
+            biography: persona.description,
+            reference_image_url: lilaAsset.url,
+            brand_hashtags: HASHTAGS,
+            persona,
+            generation_defaults: defaults,
+            memory,
+          });
+          if (!alive) return;
+          setCharacterId(id);
+          const [s, p, pr] = await Promise.all([
+            characterProfileService.seedScenes(id, SCENE_TEMPLATE_SEED),
+            characterProfileService.seedPrompts(id, PROMPT_TEMPLATE_SEED),
+            characterProfileService.seedPresets(id, INTENSITY_PRESET_SEED),
+          ]);
+          if (!alive) return;
+          setScenes(s);
+          setPrompts(p);
+          setPresets(pr);
+        }
+      } catch (err) {
+        console.error("Failed to load character profile", err);
+        toast.error("Failed to load character profile");
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleSave = async () => {
+    if (!characterId) {
+      toast.error("Character not loaded yet");
+      return;
+    }
+    setSaving(true);
+    try {
+      await characterProfileService.updateCharacter(characterId, {
+        persona,
+        generation_defaults: defaults,
+        memory,
+        biography: persona.description,
+      });
+      toast.success("Character profile saved");
+    } catch (err) {
+      console.error(err);
+      toast.error("Save failed");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const stats = [
     {
       label: "Total Templates",
-      value: String(PROMPT_TEMPLATES.length + SCENE_TEMPLATES.length),
+      value: String(prompts.length + scenes.length),
       hint: "Scene + prompt templates",
       icon: Layers,
       accent: "chart-4" as const,
     },
     {
       label: "Active Presets",
-      value: String(INTENSITY_PRESETS.length),
+      value: String(presets.length),
       hint: "Intensity tiers",
       icon: Sparkles,
       accent: "primary" as const,
@@ -381,9 +488,11 @@ function CharactersPage() {
               </Button>
               <Button
                 size="sm"
-                onClick={() => toast.success("Character profile saved")}
+                onClick={handleSave}
+                disabled={saving || loading || !characterId}
               >
-                <Save className="mr-2 h-4 w-4" /> Save changes
+                <Save className="mr-2 h-4 w-4" />
+                {saving ? "Saving…" : "Save changes"}
               </Button>
             </div>
           </header>
@@ -414,13 +523,13 @@ function CharactersPage() {
             </TabsList>
 
             <TabsContent value="scenes" className="mt-6">
-              <SceneLibrary />
+              <SceneLibrary scenes={scenes} />
             </TabsContent>
             <TabsContent value="prompts" className="mt-6">
-              <PromptLibrary />
+              <PromptLibrary prompts={prompts} />
             </TabsContent>
             <TabsContent value="presets" className="mt-6">
-              <PresetLibrary />
+              <PresetLibrary presets={presets} />
             </TabsContent>
             <TabsContent value="defaults" className="mt-6">
               <DefaultsPanel defaults={defaults} setDefaults={setDefaults} />
@@ -437,6 +546,40 @@ function CharactersPage() {
     </SidebarProvider>
   );
 }
+
+// ---------------- Seeds for first-run ----------------
+
+const SCENE_TEMPLATE_SEED: Array<Omit<SceneRow, "id">> = SCENE_TEMPLATES.map(
+  (s, idx) => ({
+    category: s.category,
+    label: s.name,
+    prompt: s.prompt,
+    intensity: s.intensity,
+    description: s.description,
+    sort_order: idx,
+  }),
+);
+
+const PROMPT_TEMPLATE_SEED: Array<Omit<PromptRow, "id">> = PROMPT_TEMPLATES.map(
+  (p, idx) => ({
+    name: p.name,
+    prompt: p.template,
+    caption_direction: p.caption,
+    intensity: p.intensity,
+    category: null,
+    sort_order: idx,
+  }),
+);
+
+const INTENSITY_PRESET_SEED: Array<Omit<IntensityPresetRow, "id">> =
+  INTENSITY_PRESETS.map((p, idx) => ({
+    key: p.id,
+    label: p.name,
+    prompt_style: p.promptStyle,
+    caption_style: p.captionStyle,
+    negative_prompt: p.negativePrompt,
+    sort_order: idx,
+  }));
 
 // ---------------- Sections ----------------
 
