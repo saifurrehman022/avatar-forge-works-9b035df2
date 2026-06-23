@@ -300,6 +300,7 @@ export type Database = {
           description: string | null
           enabled: boolean
           id: string
+          intensity: string | null
           name: string
           prompt: string
           sort_order: number
@@ -313,6 +314,7 @@ export type Database = {
           description?: string | null
           enabled?: boolean
           id?: string
+          intensity?: string | null
           name: string
           prompt?: string
           sort_order?: number
@@ -326,6 +328,7 @@ export type Database = {
           description?: string | null
           enabled?: boolean
           id?: string
+          intensity?: string | null
           name?: string
           prompt?: string
           sort_order?: number
@@ -382,6 +385,7 @@ export type Database = {
           category: string
           character_id: string
           created_at: string
+          description: string | null
           enabled: boolean
           id: string
           intensity: string
@@ -394,6 +398,7 @@ export type Database = {
           category: string
           character_id: string
           created_at?: string
+          description?: string | null
           enabled?: boolean
           id?: string
           intensity?: string
@@ -406,6 +411,7 @@ export type Database = {
           category?: string
           character_id?: string
           created_at?: string
+          description?: string | null
           enabled?: boolean
           id?: string
           intensity?: string
