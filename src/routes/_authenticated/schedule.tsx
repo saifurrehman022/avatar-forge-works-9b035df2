@@ -688,14 +688,8 @@ function SchedulePage() {
         onRemove={removeItem}
       />
 
-      <CreateScheduleDialog
-        open={createOpen}
-        onOpenChange={setCreateOpen}
-        onCreate={(item) => {
-          setItems((prev) => [item, ...prev]);
-          toast.success("Content scheduled");
-        }}
-      />
+      <CreateScheduleDialog open={createOpen} onOpenChange={setCreateOpen} />
+
     </SidebarProvider>
   );
 }
