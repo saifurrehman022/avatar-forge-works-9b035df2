@@ -653,6 +653,41 @@ function SettingsPage() {
 
 // ---------------- Sub components ----------------
 
+function SectionCard({
+  title,
+  description,
+  icon: Icon,
+  children,
+}: {
+  title: string;
+  description?: string;
+  icon: React.ElementType;
+  children: React.ReactNode;
+}) {
+  return (
+    <Card className="border-border/60 bg-card/60">
+      <CardContent className="p-6">
+        <div className="mb-5 flex items-start gap-3">
+          <div className="grid h-9 w-9 place-items-center rounded-lg bg-gradient-to-br from-primary/25 to-primary/0 text-primary">
+            <Icon className="h-4 w-4" />
+          </div>
+          <div>
+            <h2 className="font-display text-base font-semibold tracking-tight">
+              {title}
+            </h2>
+            {description && (
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                {description}
+              </p>
+            )}
+          </div>
+        </div>
+        {children}
+      </CardContent>
+    </Card>
+  );
+}
+
 function ToggleRow({
   label,
   description,
