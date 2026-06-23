@@ -46,7 +46,7 @@ import {
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 
-export const Route = createFileRoute("/review")({
+export const Route = createFileRoute("/_authenticated/review")({
   head: () => ({
     meta: [
       { title: "Review Queue — Lila Studio" },

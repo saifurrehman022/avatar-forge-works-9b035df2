@@ -15,7 +15,7 @@ import { ActivityFeed } from "@/components/dashboard/activity-feed";
 import { ScheduleWidget } from "@/components/dashboard/schedule-widget";
 import { QuickActions } from "@/components/dashboard/quick-actions";
 
-export const Route = createFileRoute("/")({
+export const Route = createFileRoute("/_authenticated/")({
   head: () => ({
     meta: [
       { title: "Dashboard — Lila Studio" },

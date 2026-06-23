@@ -49,7 +49,7 @@ import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 
 import lilaAsset from "@/assets/lila-identity.jpg.asset.json";
 
-export const Route = createFileRoute("/characters")({
+export const Route = createFileRoute("/_authenticated/characters")({
   head: () => ({
     meta: [
       { title: "Character Manager — Lila Studio" },

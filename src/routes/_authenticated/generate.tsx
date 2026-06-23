@@ -28,7 +28,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
 
-export const Route = createFileRoute("/generate")({
+export const Route = createFileRoute("/_authenticated/generate")({
   head: () => ({
     meta: [
       { title: "Content Generation — Lila Studio" },
