@@ -183,12 +183,38 @@ function VideoGenerationTab() {
   );
 
   const onGenerate = async () => {
+    if (!user) {
+      toast.error("You must be signed in to queue a job.");
+      return;
+    }
     setSubmitting(true);
-    await new Promise((r) => setTimeout(r, 1200));
-    setSubmitting(false);
-    toast.success("Generation job queued", {
-      description: `${scenes.length} scenes · ${totalFrames.toLocaleString()} frames · ~${durationSec.toFixed(1)}s`,
-    });
+    try {
+      await generationService.enqueue({
+        type: "video",
+        character_id: lila?.id ?? null,
+        created_by: user.id,
+        status: "queued",
+        input_payload: {
+          fps,
+          framesPerScene,
+          samplingSteps,
+          numScenes: scenes.length,
+          totalFrames,
+          durationSec,
+          referenceImageName: refImage?.name ?? null,
+          scenes: scenes.map((s) => s.prompt),
+          negativePrompt: negative,
+        },
+      });
+      toast.success("Generation job queued", {
+        description: `${scenes.length} scenes · ${totalFrames.toLocaleString()} frames · ~${durationSec.toFixed(1)}s`,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to queue job";
+      toast.error(msg);
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const canGenerate = !!refImage && scenes.every((s) => s.prompt.trim().length > 0);
