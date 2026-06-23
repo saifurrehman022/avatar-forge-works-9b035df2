@@ -229,7 +229,25 @@ function timeAgo(iso: string) {
 // ---------- Page ----------
 
 function ReviewPage() {
-  const [items, setItems] = useState<ReviewItem[]>(MOCK_ITEMS);
+  const queryClient = useQueryClient();
+  const { data: queueItems = [] } = useQuery({
+    queryKey: ["review-queue"],
+    queryFn: fetchQueue,
+    staleTime: 10_000,
+  });
+  const [items, setItems] = useState<ReviewItem[]>([]);
+  useEffect(() => setItems(queueItems), [queueItems]);
+
+  useEffect(() => {
+    const ch = supabase
+      .channel("review-queue-rt")
+      .on("postgres_changes", { event: "*", schema: "public", table: "review_queue" }, () =>
+        queryClient.invalidateQueries({ queryKey: ["review-queue"] }),
+      )
+      .subscribe();
+    return () => { supabase.removeChannel(ch); };
+  }, [queryClient]);
+
   const [selected, setSelected] = useState<string[]>([]);
   const [openId, setOpenId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -239,6 +257,7 @@ function ReviewPage() {
   const [noteDraft, setNoteDraft] = useState("");
 
   const openItem = items.find((i) => i.id === openId) ?? null;
+  const CHARS = Array.from(new Set(items.map((i) => i.character)));
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
