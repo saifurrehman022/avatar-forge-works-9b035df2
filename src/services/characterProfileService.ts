@@ -170,7 +170,10 @@ export const characterProfileService = {
     if (patch.reference_image_url !== undefined)
       update.reference_image_url = patch.reference_image_url;
 
-    const { error } = await supabase.from("characters").update(update).eq("id", id);
+    const { error } = await supabase
+      .from("characters")
+      .update(update as never)
+      .eq("id", id);
     if (error) throw error;
   },
 
