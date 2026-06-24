@@ -119,6 +119,8 @@ type ReviewItem = {
   history: HistoryEvent[];
 };
 
+const EMPTY_REVIEW_ITEMS: ReviewItem[] = [];
+
 // ---------- Data loading ----------
 
 const NEG_DEFAULT =
@@ -246,7 +248,7 @@ function timeAgo(iso: string) {
 
 function ReviewPage() {
   const queryClient = useQueryClient();
-  const { data: queueItems = [] } = useQuery({
+  const { data: queueItems = EMPTY_REVIEW_ITEMS } = useQuery({
     queryKey: ["review-queue"],
     queryFn: fetchQueue,
     staleTime: 10_000,

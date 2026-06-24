@@ -157,6 +157,9 @@ type ScheduledItem = {
   history: HistoryEvent[];
 };
 
+const EMPTY_SCHEDULE_ITEMS: ScheduledItem[] = [];
+const EMPTY_CONNECTED_ACCOUNTS: ConnectedAccount[] = [];
+
 // ---------- Mock data ----------
 
 // ---------- Data loaders ----------
@@ -318,8 +321,8 @@ function QueueBadge({ status }: { status: QueueStatus }) {
 
 function SchedulePage() {
   const queryClient = useQueryClient();
-  const { data: scheduleData = [] } = useQuery({ queryKey: ["schedules"], queryFn: fetchSchedules, staleTime: 10_000 });
-  const { data: accounts = [] } = useQuery({ queryKey: ["connected-accounts"], queryFn: fetchAccounts, staleTime: 60_000 });
+  const { data: scheduleData = EMPTY_SCHEDULE_ITEMS } = useQuery({ queryKey: ["schedules"], queryFn: fetchSchedules, staleTime: 10_000 });
+  const { data: accounts = EMPTY_CONNECTED_ACCOUNTS } = useQuery({ queryKey: ["connected-accounts"], queryFn: fetchAccounts, staleTime: 60_000 });
   const [items, setItems] = useState<ScheduledItem[]>([]);
   useEffect(() => setItems(scheduleData), [scheduleData]);
 
@@ -1377,6 +1380,8 @@ type ApprovedAsset = {
   thumbnail: string;
 };
 
+const EMPTY_APPROVED_ASSETS: ApprovedAsset[] = [];
+
 async function fetchApprovedAssets(): Promise<ApprovedAsset[]> {
   const [imgRes, vidRes, charRes] = await Promise.all([
     supabase.from("images").select("id, image_url, prompt, character_id").eq("status", "approved"),
@@ -1409,12 +1414,12 @@ function CreateScheduleDialog({
   onOpenChange: (o: boolean) => void;
 }) {
   const queryClient = useQueryClient();
-  const { data: assets = [] } = useQuery({
+  const { data: assets = EMPTY_APPROVED_ASSETS } = useQuery({
     queryKey: ["approved-assets"],
     queryFn: fetchApprovedAssets,
     enabled: open,
   });
-  const { data: accounts = [] } = useQuery({
+  const { data: accounts = EMPTY_CONNECTED_ACCOUNTS } = useQuery({
     queryKey: ["connected-accounts"],
     queryFn: fetchAccounts,
     enabled: open,
