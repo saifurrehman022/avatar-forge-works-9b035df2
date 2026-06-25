@@ -39,7 +39,7 @@ import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 
-export const Route = createFileRoute("/_authenticated/generate")({
+export const Route = createFileRoute("/_authenticated/generate/")({
   head: () => ({
     meta: [
       { title: "Content Generation — Lila Studio" },
