@@ -1,13 +1,19 @@
-export async function loader({ request }: { request: Request }) {
-  const url = new URL(request.url);
-  const code = url.searchParams.get("code");
+import { createFileRoute, redirect } from "@tanstack/react-router";
 
-  if (!code) {
-    throw new Response("Missing code", { status: 400 });
-  }
+export const Route = createFileRoute("/fanvue-callback")({
+  beforeLoad: ({ location }) => {
+    const url = new URL(location.href);
+    const code = url.searchParams.get("code");
 
-  return Response.redirect("/generate");
-}
+    if (!code) {
+      throw new Response("Missing code", { status: 400 });
+    }
+
+    throw redirect({
+      to: "/generate",
+    });
+  },
+});
 
 export default function FanvueCallback() {
   return <div>Connecting Fanvue...</div>;
