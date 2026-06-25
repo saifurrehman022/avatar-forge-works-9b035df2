@@ -17,7 +17,7 @@ import { ScheduleWidget } from "@/components/dashboard/schedule-widget";
 import { QuickActions } from "@/components/dashboard/quick-actions";
 import { supabase } from "@/integrations/supabase/client";
 
-export const Route = createFileRoute("/_authenticated/")({
+export const Route = createFileRoute("/_authenticated")({
   head: () => ({
     meta: [
       { title: "Dashboard — Lila Studio" },
