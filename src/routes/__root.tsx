@@ -6,14 +6,14 @@ import {
 import { Toaster } from "@/components/ui/sonner";
 
 export const Route = createRootRoute({
-  component: RootComponent,
+  component: RootLayout,
 });
 
-function RootComponent() {
+function RootLayout() {
   return (
-    <>
+    <div className="min-h-screen bg-background text-foreground">
       <Outlet />
       <Toaster />
-    </>
+    </div>
   );
 }
