@@ -21,7 +21,7 @@ import {
   ExternalLink,
   AlertCircle,
   Clock,
-  RefreshCw,
+  StopCircle,
 } from "lucide-react";
 import { toast } from "sonner";
 import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
@@ -52,20 +52,20 @@ export const Route = createFileRoute("/_authenticated/generate")({
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
-const RUNPOD_API_KEY      = import.meta.env.VITE_RUNPOD_API_KEY as string;
-const RUNPOD_ENDPOINT_ID  = import.meta.env.VITE_RUNPOD_ENDPOINT_ID as string;
+const RUNPOD_API_KEY           = import.meta.env.VITE_RUNPOD_API_KEY as string;
+const RUNPOD_ENDPOINT_ID       = import.meta.env.VITE_RUNPOD_ENDPOINT_ID as string;
 const RUNPOD_IMAGE_ENDPOINT_ID = import.meta.env.VITE_RUNPOD_IMAGE_ENDPOINT_ID as string ?? "qwen-image-edit-2511-lora";
-const RUNPOD_BASE         = `https://api.runpod.ai/v2/${RUNPOD_ENDPOINT_ID}`;
-const RUNPOD_IMAGE_BASE   = `https://api.runpod.ai/v2/${RUNPOD_IMAGE_ENDPOINT_ID}`;
+const RUNPOD_BASE              = `https://api.runpod.ai/v2/${RUNPOD_ENDPOINT_ID}`;
+const RUNPOD_IMAGE_BASE        = `https://api.runpod.ai/v2/${RUNPOD_IMAGE_ENDPOINT_ID}`;
 
-const JOB_STORAGE_KEY     = "lila_video_job";
+const JOB_STORAGE_KEY       = "lila_video_job";
 const IMAGE_JOB_STORAGE_KEY = "lila_image_job";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 type Scene = { id: string; prompt: string };
-type JobStatus = "idle" | "submitting" | "queued" | "in_progress" | "completed" | "failed";
+type JobStatus = "idle" | "submitting" | "queued" | "in_progress" | "completed" | "failed" | "cancelled";
 
 interface VideoJobState {
   status: JobStatus;
@@ -136,28 +136,18 @@ function makeDefaultScenes(): Scene[] {
 // Persistence helpers
 // ---------------------------------------------------------------------------
 function saveJob<T>(key: string, job: T) {
-  try {
-    if (typeof window === "undefined") return;
-    localStorage.setItem(key, JSON.stringify(job));
-  } catch {}
+  try { if (typeof window === "undefined") return; localStorage.setItem(key, JSON.stringify(job)); } catch {}
 }
-
 function loadJob<T>(key: string, fallback: T): T {
   try {
     if (typeof window === "undefined") return fallback;
     const raw = localStorage.getItem(key);
     if (!raw) return fallback;
     return JSON.parse(raw) as T;
-  } catch {
-    return fallback;
-  }
+  } catch { return fallback; }
 }
-
 function clearJob(key: string) {
-  try {
-    if (typeof window === "undefined") return;
-    localStorage.removeItem(key);
-  } catch {}
+  try { if (typeof window === "undefined") return; localStorage.removeItem(key); } catch {}
 }
 
 // ---------------------------------------------------------------------------
@@ -188,12 +178,27 @@ async function submitImageJob(input: object): Promise<string> {
   return data.id as string;
 }
 
-async function pollVideo(jobId: string) {
-  return rpFetch(`${RUNPOD_BASE}/status/${jobId}`);
+async function pollVideo(jobId: string) { return rpFetch(`${RUNPOD_BASE}/status/${jobId}`); }
+async function pollImage(jobId: string) { return rpFetch(`${RUNPOD_IMAGE_BASE}/status/${jobId}`); }
+
+// FIX 1 — Cancel helpers: POST to RunPod /cancel/:jobId endpoint
+async function cancelVideoJob(jobId: string) {
+  return rpFetch(`${RUNPOD_BASE}/cancel/${jobId}`, { method: "POST" });
+}
+async function cancelImageJob(jobId: string) {
+  return rpFetch(`${RUNPOD_IMAGE_BASE}/cancel/${jobId}`, { method: "POST" });
 }
 
-async function pollImage(jobId: string) {
-  return rpFetch(`${RUNPOD_IMAGE_BASE}/status/${jobId}`);
+// ---------------------------------------------------------------------------
+// File → base64 helper (shared)
+// ---------------------------------------------------------------------------
+async function fileToBase64(file: File): Promise<string> {
+  return new Promise((res, rej) => {
+    const reader = new FileReader();
+    reader.onload = () => res((reader.result as string).split(",")[1]);
+    reader.onerror = rej;
+    reader.readAsDataURL(file);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -260,10 +265,8 @@ function VideoGenerationTab() {
   const [scenes, setScenes] = useState<Scene[]>(() => makeDefaultScenes());
   const [negative, setNegative] = useState("extreme close-up, macro shot, static image, text, watermark, bad anatomy, deformed, blurry, low quality, sudden cuts, flickering artifacts");
 
-  // Load persisted job on mount
   const [job, setJobRaw] = useState<VideoJobState>(() => {
     const saved = loadJob<VideoJobState>(JOB_STORAGE_KEY, INITIAL_VIDEO_JOB);
-    // Only restore if it was running or completed
     if (["queued", "in_progress", "completed", "failed"].includes(saved.status)) return saved;
     return INITIAL_VIDEO_JOB;
   });
@@ -276,14 +279,13 @@ function VideoGenerationTab() {
     });
   };
 
-  const timerRef   = useRef<ReturnType<typeof setInterval> | null>(null);
+  const timerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
   const startTimeRef = useRef<number>(job.startedAt ?? 0);
-  const pollRef    = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollRef     = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const stopTimer = () => { if (timerRef.current) clearInterval(timerRef.current); };
   const stopPoll  = () => { if (pollRef.current)  clearInterval(pollRef.current); };
 
-  // Resume polling if job was in progress when page was closed
   useEffect(() => {
     if (job.jobId && (job.status === "queued" || job.status === "in_progress")) {
       startTimeRef.current = job.startedAt ?? Date.now();
@@ -321,10 +323,7 @@ function VideoGenerationTab() {
           stopPoll(); stopTimer();
           const out = data.output;
           const videoUrl = out?.final_video_url;
-          if (!videoUrl) {
-            setJob((j) => ({ ...j, status: "failed", error: "No video URL in response." }));
-            return;
-          }
+          if (!videoUrl) { setJob((j) => ({ ...j, status: "failed", error: "No video URL in response." })); return; }
           setJob((j) => ({ ...j, status: "completed", progress: 100, progressLabel: "Complete!", finalVideoUrl: videoUrl, chunkUrls: out?.chunk_urls ?? [] }));
           toast.success("Video ready!");
         } else if (data.status === "FAILED") {
@@ -332,13 +331,31 @@ function VideoGenerationTab() {
           const errMsg = data.error ?? data.output?.error ?? "Job failed on RunPod";
           setJob((j) => ({ ...j, status: "failed", error: errMsg }));
           toast.error("Generation failed", { description: errMsg });
+        } else if (data.status === "CANCELLED") {
+          stopPoll(); stopTimer();
+          setJob((j) => ({ ...j, status: "cancelled", progressLabel: "Cancelled" }));
         }
       } catch (e) { console.warn("Poll error:", e); }
     }, 4000);
   }
 
+  // FIX 1 — Cancel handler for video
+  const onCancelVideo = async () => {
+    if (!job.jobId) return;
+    stopPoll(); stopTimer();
+    try {
+      await cancelVideoJob(job.jobId);
+      toast.info("Job cancellation requested");
+    } catch (e) {
+      console.warn("Cancel request error:", e);
+      toast.warning("Cancel request sent (RunPod may still finish the job)");
+    }
+    clearJob(JOB_STORAGE_KEY);
+    setJob({ ...INITIAL_VIDEO_JOB, status: "cancelled" });
+  };
+
   const onGenerate = async () => {
-    if (!RUNPOD_API_KEY || !RUNPOD_ENDPOINT_ID) { toast.error("RunPod not configured. Set VITE_RUNPOD_API_KEY and VITE_RUNPOD_ENDPOINT_ID."); return; }
+    if (!RUNPOD_API_KEY || !RUNPOD_ENDPOINT_ID) { toast.error("RunPod not configured."); return; }
     if (!refImage) { toast.error("Upload a reference image first."); return; }
     if (!scenes.every((s) => s.prompt.trim().length > 0)) { toast.error("Fill in all scene prompts."); return; }
 
@@ -346,12 +363,7 @@ function VideoGenerationTab() {
 
     let imageInput: { image_url?: string; images?: { name: string; image: string }[] } = {};
     if (refImage.url.startsWith("blob:")) {
-      const b64 = await new Promise<string>((res, rej) => {
-        const reader = new FileReader();
-        reader.onload = () => res((reader.result as string).split(",")[1]);
-        reader.onerror = rej;
-        reader.readAsDataURL(refImage.file);
-      });
+      const b64 = await fileToBase64(refImage.file);
       imageInput = { images: [{ name: refImage.name, image: b64 }] };
     } else {
       imageInput = { image_url: refImage.url };
@@ -365,12 +377,10 @@ function VideoGenerationTab() {
       startTimeRef.current = now;
       setJob((j) => ({ ...j, status: "queued", jobId, startedAt: now, progress: 8, progressLabel: "Job queued, waiting for worker…" }));
       toast.success("Job submitted", { description: `ID: ${jobId.slice(0, 12)}…` });
-
       timerRef.current = setInterval(() => {
         const elapsed = Math.round((Date.now() - startTimeRef.current) / 1000);
         setJob((j) => ({ ...j, elapsedSec: elapsed }));
       }, 1000);
-
       startPollingVideo(jobId);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to submit job";
@@ -400,7 +410,19 @@ function VideoGenerationTab() {
         <SettingsCard fps={fps} setFps={setFps} framesPerScene={framesPerScene} setFramesPerScene={setFramesPerScene} numScenes={scenes.length} samplingSteps={samplingSteps} setSamplingSteps={setSamplingSteps} />
         <SceneBuilder scenes={scenes} addScene={addScene} removeScene={removeScene} updateScene={updateScene} moveScene={moveScene} />
         <NegativePromptCard value={negative} onChange={setNegative} />
-        {isRunning && <JobProgressCard job={job} />}
+        {isRunning && <JobProgressCard job={job} onCancel={onCancelVideo} />}
+        {job.status === "cancelled" && (
+          <Card className="border-warning/30 bg-warning/5">
+            <CardContent className="flex items-center gap-3 py-5">
+              <StopCircle className="h-5 w-5 text-warning" />
+              <div className="flex-1">
+                <p className="text-sm font-medium">Job cancelled</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">The request was sent to RunPod. Any already-running worker may still complete shortly.</p>
+              </div>
+              <Button variant="outline" size="sm" onClick={() => setJob(INITIAL_VIDEO_JOB)}>Dismiss</Button>
+            </CardContent>
+          </Card>
+        )}
         {job.status === "completed" && job.finalVideoUrl && (
           <VideoResultCard url={job.finalVideoUrl} chunkUrls={job.chunkUrls} elapsedSec={job.elapsedSec} onReset={() => { clearJob(JOB_STORAGE_KEY); setJob(INITIAL_VIDEO_JOB); }} />
         )}
@@ -409,19 +431,20 @@ function VideoGenerationTab() {
         )}
       </div>
       <div className="flex flex-col gap-6 lg:col-span-1">
-        <VideoSummaryPanel refImage={refImage} totalScenes={scenes.length} fps={fps} framesPerScene={framesPerScene} samplingSteps={samplingSteps} totalFrames={totalFrames} durationSec={durationSec} canGenerate={canGenerate} isRunning={isRunning} job={job} onGenerate={onGenerate} />
+        <VideoSummaryPanel refImage={refImage} totalScenes={scenes.length} fps={fps} framesPerScene={framesPerScene} samplingSteps={samplingSteps} totalFrames={totalFrames} durationSec={durationSec} canGenerate={canGenerate} isRunning={isRunning} job={job} onGenerate={onGenerate} onCancel={onCancelVideo} />
       </div>
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Image Generation Tab
+// Image Generation Tab  — FIX 2: added reference image upload
 // ---------------------------------------------------------------------------
 function ImageGenerationTab() {
+  const [refImage, setRefImage] = useState<{ url: string; name: string; file: File } | null>(null);
   const [prompt, setPrompt] = useState("A futuristic city with a slightly dark neon atmosphere and glowing street lights. The girl in the foreground, her face and body well lit by the street lighting");
-  const [size, setSize] = useState("1024*1024");
-  const [seed, setSeed] = useState(-1);
+  const [size, setSize]     = useState("1024*1024");
+  const [seed, setSeed]     = useState(-1);
 
   const [job, setJobRaw] = useState<ImageJobState>(() => {
     const saved = loadJob<ImageJobState>(IMAGE_JOB_STORAGE_KEY, INITIAL_IMAGE_JOB);
@@ -437,11 +460,11 @@ function ImageGenerationTab() {
     });
   };
 
-  const timerRef   = useRef<ReturnType<typeof setInterval> | null>(null);
+  const timerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
   const startTimeRef = useRef<number>(job.startedAt ?? 0);
-  const pollRef    = useRef<ReturnType<typeof setInterval> | null>(null);
-  const stopTimer  = () => { if (timerRef.current) clearInterval(timerRef.current); };
-  const stopPoll   = () => { if (pollRef.current)  clearInterval(pollRef.current); };
+  const pollRef     = useRef<ReturnType<typeof setInterval> | null>(null);
+  const stopTimer   = () => { if (timerRef.current) clearInterval(timerRef.current); };
+  const stopPoll    = () => { if (pollRef.current)  clearInterval(pollRef.current); };
 
   function startPollingImage(jobId: string) {
     pollRef.current = setInterval(async () => {
@@ -451,7 +474,6 @@ function ImageGenerationTab() {
           setJob((j) => ({ ...j, status: data.status === "IN_QUEUE" ? "queued" : "in_progress" }));
         } else if (data.status === "COMPLETED") {
           stopPoll(); stopTimer();
-          // Qwen returns output.image_url or output[0].url depending on version
           const out = data.output;
           const imgUrl = out?.image_url ?? out?.[0]?.url ?? out?.url ?? null;
           if (!imgUrl) { setJob((j) => ({ ...j, status: "failed", error: "No image URL in response." })); return; }
@@ -462,6 +484,9 @@ function ImageGenerationTab() {
           const errMsg = data.error ?? "Image generation failed";
           setJob((j) => ({ ...j, status: "failed", error: errMsg }));
           toast.error(errMsg);
+        } else if (data.status === "CANCELLED") {
+          stopPoll(); stopTimer();
+          setJob((j) => ({ ...j, status: "cancelled" }));
         }
       } catch (e) { console.warn("Image poll error:", e); }
     }, 3000);
@@ -480,12 +505,48 @@ function ImageGenerationTab() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // FIX 1 — Cancel handler for image
+  const onCancelImage = async () => {
+    if (!job.jobId) return;
+    stopPoll(); stopTimer();
+    try {
+      await cancelImageJob(job.jobId);
+      toast.info("Job cancellation requested");
+    } catch (e) {
+      console.warn("Cancel request error:", e);
+      toast.warning("Cancel request sent (RunPod may still finish the job)");
+    }
+    clearJob(IMAGE_JOB_STORAGE_KEY);
+    setJob({ ...INITIAL_IMAGE_JOB, status: "cancelled" });
+  };
+
   const onGenerate = async () => {
     if (!RUNPOD_API_KEY) { toast.error("Set VITE_RUNPOD_API_KEY in your .env file."); return; }
     if (!prompt.trim()) { toast.error("Enter a prompt."); return; }
+    if (!refImage) { toast.error("Upload a reference image first."); return; }
+
     setJob({ ...INITIAL_IMAGE_JOB, status: "submitting" });
+
     try {
-      const input = { enable_base64_output: false, enable_sync_mode: false, output_format: "jpeg", prompt: prompt.trim(), seed, size };
+      // FIX 2 — Build image input exactly like the video tab
+      let imageInput: { image_url?: string; images?: { name: string; image: string }[] } = {};
+      if (refImage.url.startsWith("blob:")) {
+        const b64 = await fileToBase64(refImage.file);
+        imageInput = { images: [{ name: refImage.name, image: b64 }] };
+      } else {
+        imageInput = { image_url: refImage.url };
+      }
+
+      const input = {
+        ...imageInput,
+        enable_base64_output: false,
+        enable_sync_mode: false,
+        output_format: "jpeg",
+        prompt: prompt.trim(),
+        seed,
+        size,
+      };
+
       const jobId = await submitImageJob(input);
       const now = Date.now();
       startTimeRef.current = now;
@@ -511,24 +572,30 @@ function ImageGenerationTab() {
     if (job.resultUrl) navigator.clipboard.writeText(job.resultUrl).then(() => toast.success("URL copied"));
   };
 
+  const canGenerate = !!refImage && !!prompt.trim() && !isRunning;
+
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
       <div className="flex flex-col gap-6 lg:col-span-2">
+
+        {/* FIX 2 — Reference image upload (same component as video tab) */}
+        <ReferenceImageCard image={refImage} setImage={setRefImage} />
+
         {/* Prompt */}
         <Card>
           <CardHeader>
             <div className="flex items-start justify-between gap-3">
               <div>
                 <CardTitle className="font-display text-lg">Image Prompt</CardTitle>
-                <CardDescription>Describe the image you want to generate using the Qwen image edit model.</CardDescription>
+                <CardDescription>Describe the edit or generation you want applied to the reference image.</CardDescription>
               </div>
-              <span className="rounded-full border border-border bg-card/60 px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">Step 1</span>
+              <span className="rounded-full border border-border bg-card/60 px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">Step 2</span>
             </div>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-1.5">
               <Label className="text-xs font-medium text-muted-foreground">Prompt</Label>
-              <Textarea rows={4} value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Describe what you want to generate…" />
+              <Textarea rows={4} value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Describe what you want to generate or change…" />
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1.5">
@@ -538,8 +605,8 @@ function ImageGenerationTab() {
                   onChange={(e) => setSize(e.target.value)}
                   className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 >
-                  {["512*512","768*768","1024*1024","1024*768","768*1024"].map((s) => (
-                    <option key={s} value={s}>{s}</option>
+                  {["512*512","768*768","1024*1024","1024*768","768*1024"].map((sz) => (
+                    <option key={sz} value={sz}>{sz}</option>
                   ))}
                 </select>
               </div>
@@ -567,12 +634,30 @@ function ImageGenerationTab() {
                   <Clock className="h-3.5 w-3.5 text-muted-foreground" />
                   <span className="font-mono text-xs text-muted-foreground">{m}m {String(s).padStart(2,"0")}s</span>
                   <Badge variant="outline" className="text-xs">{job.status === "queued" ? "Queued" : "Running"}</Badge>
+                  {/* FIX 1 — Cancel button in progress card */}
+                  <Button size="sm" variant="destructive" className="gap-1.5 h-7 px-2.5" onClick={onCancelImage}>
+                    <StopCircle className="h-3.5 w-3.5" /> Stop
+                  </Button>
                 </div>
               </div>
             </CardHeader>
             <CardContent>
               <Progress value={job.status === "queued" ? 10 : 60} className="h-2" />
               {job.jobId && <p className="mt-2 text-[11px] text-muted-foreground">Job ID: <span className="font-mono">{job.jobId}</span></p>}
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Cancelled state */}
+        {job.status === "cancelled" && (
+          <Card className="border-warning/30 bg-warning/5">
+            <CardContent className="flex items-center gap-3 py-5">
+              <StopCircle className="h-5 w-5 text-warning" />
+              <div className="flex-1">
+                <p className="text-sm font-medium">Job cancelled</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">The cancellation request was sent to RunPod.</p>
+              </div>
+              <Button variant="outline" size="sm" onClick={() => setJob(INITIAL_IMAGE_JOB)}>Dismiss</Button>
             </CardContent>
           </Card>
         )}
@@ -624,6 +709,16 @@ function ImageGenerationTab() {
             </div>
           </CardHeader>
           <CardContent>
+            {/* Reference image preview in summary */}
+            <div className="flex items-center gap-3 rounded-lg border border-border bg-muted/20 p-3 mb-4">
+              <div className="grid h-12 w-12 place-items-center overflow-hidden rounded-md border border-border bg-card">
+                {refImage ? <img src={refImage.url} alt="" className="h-full w-full object-cover" /> : <ImageIconLucide className="h-5 w-5 text-muted-foreground" />}
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-medium">{refImage ? refImage.name : "No reference selected"}</p>
+                <p className="text-[11px] text-muted-foreground">{refImage ? "Reference ready" : "Upload a reference to continue"}</p>
+              </div>
+            </div>
             <div className="divide-y divide-border">
               <SummaryRow label="Model" value="Qwen Image Edit" />
               <SummaryRow label="Size" value={size} mono />
@@ -634,12 +729,20 @@ function ImageGenerationTab() {
               size="lg"
               className="mt-5 w-full gap-2 bg-gradient-to-r from-primary to-chart-4 text-primary-foreground shadow-[0_10px_30px_-10px_var(--primary)] hover:opacity-95"
               onClick={onGenerate}
-              disabled={!prompt.trim() || isRunning}
+              disabled={!canGenerate}
             >
               {isRunning ? <><Loader2 className="h-4 w-4 animate-spin" /> Generating…</> : <><Wand2 className="h-4 w-4" /> Generate Image</>}
             </Button>
-            {!prompt.trim() && !isRunning && (
-              <p className="mt-2 text-center text-[11px] text-muted-foreground">Enter a prompt to enable.</p>
+            {/* FIX 1 — Cancel button in summary panel */}
+            {isRunning && (
+              <Button variant="outline" size="sm" className="mt-2 w-full gap-1.5 text-destructive border-destructive/30 hover:bg-destructive/5" onClick={onCancelImage}>
+                <StopCircle className="h-4 w-4" /> Cancel Job
+              </Button>
+            )}
+            {!canGenerate && !isRunning && (
+              <p className="mt-2 text-center text-[11px] text-muted-foreground">
+                {!refImage ? "Upload a reference image to enable." : !prompt.trim() ? "Enter a prompt to enable." : ""}
+              </p>
             )}
           </CardContent>
         </Card>
@@ -665,7 +768,7 @@ function ReferenceImageCard({ image, setImage }: { image: { url: string; name: s
         <div className="flex items-start justify-between gap-3">
           <div>
             <CardTitle className="font-display text-lg">Reference Image</CardTitle>
-            <CardDescription>Upload the starting image — used to maintain character consistency across all scenes.</CardDescription>
+            <CardDescription>Upload the reference image — used as the base for generation.</CardDescription>
           </div>
           <span className="rounded-full border border-border bg-card/60 px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">Step 1</span>
         </div>
@@ -795,7 +898,8 @@ function NegativePromptCard({ value, onChange }: { value: string; onChange: (v: 
   );
 }
 
-function JobProgressCard({ job }: { job: VideoJobState }) {
+// FIX 1 — JobProgressCard now accepts an onCancel prop
+function JobProgressCard({ job, onCancel }: { job: VideoJobState; onCancel: () => void }) {
   const stepIdx = Math.max(0, GENERATION_STEPS.indexOf(job.progressLabel));
   const m = Math.floor(job.elapsedSec / 60);
   const s = job.elapsedSec % 60;
@@ -808,6 +912,10 @@ function JobProgressCard({ job }: { job: VideoJobState }) {
             <Clock className="h-3.5 w-3.5 text-muted-foreground" />
             <span className="font-mono text-xs text-muted-foreground">{m}m {String(s).padStart(2, "0")}s</span>
             <Badge variant="outline" className="text-xs">{job.status === "queued" ? "Queued" : job.status === "submitting" ? "Submitting" : "Running"}</Badge>
+            {/* FIX 1 — Cancel button */}
+            <Button size="sm" variant="destructive" className="gap-1.5 h-7 px-2.5" onClick={onCancel}>
+              <StopCircle className="h-3.5 w-3.5" /> Stop
+            </Button>
           </div>
         </div>
       </CardHeader>
@@ -895,8 +1003,8 @@ function SummaryRow({ label, value, mono }: { label: string; value: ReactNode; m
   );
 }
 
-function VideoSummaryPanel({ refImage, totalScenes, fps, framesPerScene, samplingSteps, totalFrames, durationSec, canGenerate, isRunning, job, onGenerate }: {
-  refImage: { url: string; name: string } | null; totalScenes: number; fps: number; framesPerScene: number; samplingSteps: number; totalFrames: number; durationSec: number; canGenerate: boolean; isRunning: boolean; job: VideoJobState; onGenerate: () => void;
+function VideoSummaryPanel({ refImage, totalScenes, fps, framesPerScene, samplingSteps, totalFrames, durationSec, canGenerate, isRunning, job, onGenerate, onCancel }: {
+  refImage: { url: string; name: string } | null; totalScenes: number; fps: number; framesPerScene: number; samplingSteps: number; totalFrames: number; durationSec: number; canGenerate: boolean; isRunning: boolean; job: VideoJobState; onGenerate: () => void; onCancel: () => void;
 }) {
   return (
     <Card className="sticky top-24 overflow-hidden">
@@ -934,6 +1042,12 @@ function VideoSummaryPanel({ refImage, totalScenes, fps, framesPerScene, samplin
         <Button size="lg" className="mt-5 w-full gap-2 bg-gradient-to-r from-primary to-chart-4 text-primary-foreground shadow-[0_10px_30px_-10px_var(--primary)] hover:opacity-95" onClick={onGenerate} disabled={!canGenerate || isRunning}>
           {isRunning ? <><Loader2 className="h-4 w-4 animate-spin" /> Generating…</> : <><Wand2 className="h-4 w-4" /> Generate Video</>}
         </Button>
+        {/* FIX 1 — Cancel button in video summary panel */}
+        {isRunning && (
+          <Button variant="outline" size="sm" className="mt-2 w-full gap-1.5 text-destructive border-destructive/30 hover:bg-destructive/5" onClick={onCancel}>
+            <StopCircle className="h-4 w-4" /> Cancel Job
+          </Button>
+        )}
         {!canGenerate && !isRunning && (
           <p className="mt-2 text-center text-[11px] text-muted-foreground">
             {!refImage ? "Upload a reference image to enable." : "Fill every scene prompt to enable."}
