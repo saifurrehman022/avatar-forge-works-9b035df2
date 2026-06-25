@@ -117,7 +117,7 @@ const GENERATION_STEPS = [
   "Generating scene batch 1",
   "Generating scene batch 2",
   "Generating scene batch 3",
-  "Stitching final video",
+  " final video",
   "Uploading to storage",
   "Complete",
 ];
