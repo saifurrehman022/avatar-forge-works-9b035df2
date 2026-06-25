@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMemo, useRef, useState, useEffect, useCallback } from "react";
+import type { ReactNode } from "react";
 import {
   Upload,
   ImageIcon as ImageIconLucide,
@@ -20,6 +21,7 @@ import {
   ExternalLink,
   AlertCircle,
   Clock,
+  RefreshCw,
 } from "lucide-react";
 import { toast } from "sonner";
 import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
@@ -52,7 +54,7 @@ export const Route = createFileRoute("/_authenticated/generate")({
 // ---------------------------------------------------------------------------
 const RUNPOD_API_KEY      = import.meta.env.VITE_RUNPOD_API_KEY as string;
 const RUNPOD_ENDPOINT_ID  = import.meta.env.VITE_RUNPOD_ENDPOINT_ID as string;
-const RUNPOD_IMAGE_ENDPOINT_ID = (import.meta.env.VITE_RUNPOD_IMAGE_ENDPOINT_ID as string) || "qwen-image-edit-2511-lora";
+const RUNPOD_IMAGE_ENDPOINT_ID = import.meta.env.VITE_RUNPOD_IMAGE_ENDPOINT_ID as string ?? "qwen-image-edit-2511-lora";
 const RUNPOD_BASE         = `https://api.runpod.ai/v2/${RUNPOD_ENDPOINT_ID}`;
 const RUNPOD_IMAGE_BASE   = `https://api.runpod.ai/v2/${RUNPOD_IMAGE_ENDPOINT_ID}`;
 
@@ -134,19 +136,28 @@ function makeDefaultScenes(): Scene[] {
 // Persistence helpers
 // ---------------------------------------------------------------------------
 function saveJob<T>(key: string, job: T) {
-  try { localStorage.setItem(key, JSON.stringify(job)); } catch {}
+  try {
+    if (typeof window === "undefined") return;
+    localStorage.setItem(key, JSON.stringify(job));
+  } catch {}
 }
 
 function loadJob<T>(key: string, fallback: T): T {
   try {
+    if (typeof window === "undefined") return fallback;
     const raw = localStorage.getItem(key);
     if (!raw) return fallback;
     return JSON.parse(raw) as T;
-  } catch { return fallback; }
+  } catch {
+    return fallback;
+  }
 }
 
 function clearJob(key: string) {
-  try { localStorage.removeItem(key); } catch {}
+  try {
+    if (typeof window === "undefined") return;
+    localStorage.removeItem(key);
+  } catch {}
 }
 
 // ---------------------------------------------------------------------------
@@ -875,7 +886,7 @@ function ErrorCard({ message, onRetry }: { message: string; onRetry: () => void 
   );
 }
 
-function SummaryRow({ label, value, mono }: { label: string; value: React.ReactNode; mono?: boolean }) {
+function SummaryRow({ label, value, mono }: { label: string; value: ReactNode; mono?: boolean }) {
   return (
     <div className="flex items-center justify-between gap-3 py-2">
       <span className="text-xs text-muted-foreground">{label}</span>
