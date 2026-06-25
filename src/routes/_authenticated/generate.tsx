@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState, useEffect, useCallback } from "react";
 import {
   Upload,
   ImageIcon as ImageIconLucide,
@@ -14,22 +14,33 @@ import {
   Image as ImageLucide,
   Check,
   Wand2,
+  Loader2,
+  Download,
+  Copy,
+  ExternalLink,
+  AlertCircle,
+  Clock,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/dashboard/app-sidebar";
 import { AppHeader } from "@/components/dashboard/app-header";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+} from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { generationService } from "@/services/generationService";
-import { useLila } from "@/hooks/use-lila";
-import { useAuth } from "@/hooks/use-auth";
+import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
+import { Badge } from "@/components/ui/badge";
 
 export const Route = createFileRoute("/_authenticated/generate")({
   head: () => ({
@@ -45,27 +56,82 @@ export const Route = createFileRoute("/_authenticated/generate")({
   component: GeneratePage,
 });
 
+// ---------------------------------------------------------------------------
+// Config — pull from environment
+// ---------------------------------------------------------------------------
+const RUNPOD_API_KEY = import.meta.env.VITE_RUNPOD_API_KEY as string;
+const RUNPOD_ENDPOINT_ID = import.meta.env.VITE_RUNPOD_ENDPOINT_ID as string;
+const RUNPOD_BASE = `https://api.runpod.ai/v2/${RUNPOD_ENDPOINT_ID}`;
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 type Scene = { id: string; prompt: string };
 
+type JobStatus =
+  | "idle"
+  | "submitting"
+  | "queued"
+  | "in_progress"
+  | "completed"
+  | "failed";
+
+interface JobState {
+  status: JobStatus;
+  jobId: string | null;
+  progress: number;
+  progressLabel: string;
+  elapsedSec: number;
+  finalVideoUrl: string | null;
+  chunkUrls: string[];
+  error: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
 const RECOMMENDED = {
   fps: 16,
-  framesPerScene: 257,
+  framesPerScene: 162,
   numScenes: 10,
-  samplingSteps: 29,
+  samplingSteps: 6,
 };
 
 const SAMPLE_PROMPTS = [
-  "Lila walks into a sunlit Tokyo cafe, warm tones, soft bokeh.",
-  "Close-up portrait, gentle smile, natural window light.",
-  "She picks up a ceramic cup, steam rising, cinematic shallow depth.",
-  "Wide shot of cafe interior, golden hour, film grain.",
-  "Lila looks out the window, contemplative, rain on glass.",
-  "She turns to camera, soft laugh, lens flare.",
-  "Detail shot of hands holding cup, warm rim light.",
-  "Standing up, smoothing skirt, smooth tracking shot.",
-  "Walking toward the door, back-lit silhouette.",
-  "Exiting onto the street, neon reflections at dusk.",
+  "A stable medium-wide shot. She reaches down and opens a notebook, sketching a butterfly. The lines begin to glow with golden light.",
+  "A fixed wide shot. A glowing golden butterfly rises from the notebook pages, fluttering upward. She watches in awe.",
+  "A stable medium shot. The butterfly swoops down and lands on her nose, morphing into a pencil sketch on her skin.",
+  "A clear stable shot. She turns to a new page and a fresh drawing of magical creatures lifts off in 3D form.",
+  "A wide cinematic shot. Golden swirls erupt from the open book, filling the room with volumetric lighting and stardust.",
+  "A stable wide shot. She stands up and dances joyfully alongside floating animated paper origami creatures.",
+  "A continuous medium-wide shot. Floating paper drawings descend and transform into miniature animals at her feet.",
+  "A stable medium close-up. She holds her finger steady as a glowing paper bird softly lands on her fingertip.",
+  "A grand wide-angle tracking shot. The bedroom walls dissolve into a vast surreal forest of living notebook pages.",
+  "A final stable medium shot. She snaps the notebook shut. The paper forest dissolves and golden stardust settles.",
 ];
+
+const GENERATION_STEPS = [
+  "Job submitted to RunPod",
+  "Workers initialising",
+  "Loading models into GPU",
+  "Generating scene batch 1",
+  "Generating scene batch 2",
+  "Generating scene batch 3",
+  "Stitching final video",
+  "Uploading to storage",
+  "Complete",
+];
+
+const INITIAL_JOB: JobState = {
+  status: "idle",
+  jobId: null,
+  progress: 0,
+  progressLabel: "",
+  elapsedSec: 0,
+  finalVideoUrl: null,
+  chunkUrls: [],
+  error: null,
+};
 
 const newId = () => Math.random().toString(36).slice(2, 10);
 
@@ -76,6 +142,42 @@ function makeDefaultScenes(): Scene[] {
   }));
 }
 
+// ---------------------------------------------------------------------------
+// RunPod helpers
+// ---------------------------------------------------------------------------
+async function submitJob(input: object): Promise<string> {
+  const res = await fetch(`${RUNPOD_BASE}/run`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${RUNPOD_API_KEY}`,
+    },
+    body: JSON.stringify({ input }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`RunPod submit failed (${res.status}): ${text}`);
+  }
+  const data = await res.json();
+  if (!data.id) throw new Error("No job ID returned from RunPod");
+  return data.id as string;
+}
+
+async function pollJobStatus(jobId: string): Promise<{
+  status: string;
+  output?: { final_video_url?: string; chunk_urls?: string[]; error?: string };
+  error?: string;
+}> {
+  const res = await fetch(`${RUNPOD_BASE}/status/${jobId}`, {
+    headers: { Authorization: `Bearer ${RUNPOD_API_KEY}` },
+  });
+  if (!res.ok) throw new Error(`Status poll failed (${res.status})`);
+  return res.json();
+}
+
+// ---------------------------------------------------------------------------
+// Page shell
+// ---------------------------------------------------------------------------
 function GeneratePage() {
   return (
     <SidebarProvider>
@@ -110,12 +212,12 @@ function PageHeading() {
           Content Generation
         </h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Compose a multi-scene video or image batch and dispatch it to the RunPod pipeline.
+          Compose a multi-scene video and dispatch it to the RunPod pipeline.
         </p>
       </div>
       <span className="mt-4 inline-flex items-center gap-1.5 self-start rounded-full border border-border bg-card/60 px-2.5 py-1 text-xs text-muted-foreground md:mt-0">
         <span className="h-1.5 w-1.5 rounded-full bg-success shadow-[0_0_8px_var(--success)]" />
-        RunPod · 3 workers idle
+        RunPod · endpoint {RUNPOD_ENDPOINT_ID?.slice(0, 8) ?? "not set"}
       </span>
     </div>
   );
@@ -132,11 +234,9 @@ function GenerationTabs() {
           <ImageLucide className="h-4 w-4" /> Image Generation
         </TabsTrigger>
       </TabsList>
-
       <TabsContent value="video" className="mt-6">
         <VideoGenerationTab />
       </TabsContent>
-
       <TabsContent value="image" className="mt-6">
         <ImageGenerationPlaceholder />
       </TabsContent>
@@ -144,21 +244,35 @@ function GenerationTabs() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Video Generation Tab — main orchestrator
+// ---------------------------------------------------------------------------
 function VideoGenerationTab() {
-  const [refImage, setRefImage] = useState<{ url: string; name: string } | null>(null);
+  const [refImage, setRefImage] = useState<{ url: string; name: string; file: File } | null>(null);
   const [fps, setFps] = useState(RECOMMENDED.fps);
   const [framesPerScene, setFramesPerScene] = useState(RECOMMENDED.framesPerScene);
   const [samplingSteps, setSamplingSteps] = useState(RECOMMENDED.samplingSteps);
   const [scenes, setScenes] = useState<Scene[]>(() => makeDefaultScenes());
   const [negative, setNegative] = useState(
-    "low quality, blurry, distorted face, extra fingers, watermark, text, logo"
+    "extreme close-up, macro shot, static image, text, watermark, bad anatomy, deformed, blurry, low quality, sudden cuts, flickering artifacts"
   );
-  const [submitting, setSubmitting] = useState(false);
-  const { data: lila } = useLila();
-  const { user } = useAuth();
+  const [job, setJob] = useState<JobState>(INITIAL_JOB);
 
-  const addScene = () =>
-    setScenes((s) => [...s, { id: newId(), prompt: "" }]);
+  // Elapsed timer
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const startTimeRef = useRef<number>(0);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopTimer = () => {
+    if (timerRef.current) clearInterval(timerRef.current);
+  };
+  const stopPoll = () => {
+    if (pollRef.current) clearInterval(pollRef.current);
+  };
+
+  useEffect(() => () => { stopTimer(); stopPoll(); }, []);
+
+  const addScene = () => setScenes((s) => [...s, { id: newId(), prompt: "" }]);
   const removeScene = (id: string) =>
     setScenes((s) => (s.length > 1 ? s.filter((x) => x.id !== id) : s));
   const updateScene = (id: string, prompt: string) =>
@@ -173,64 +287,169 @@ function VideoGenerationTab() {
       return copy;
     });
 
-  const totalFrames = useMemo(
-    () => scenes.length * framesPerScene,
-    [scenes.length, framesPerScene]
-  );
-  const durationSec = useMemo(
-    () => (fps > 0 ? totalFrames / fps : 0),
-    [totalFrames, fps]
-  );
+  const totalFrames = useMemo(() => scenes.length * framesPerScene, [scenes.length, framesPerScene]);
+  const durationSec = useMemo(() => (fps > 0 ? totalFrames / fps : 0), [totalFrames, fps]);
+
+  // Derive step index from elapsed time + status for progress bar
+  const getStepFromElapsed = useCallback((elapsed: number, status: JobStatus) => {
+    if (status === "queued") return 1;
+    if (elapsed < 60) return 2;
+    if (elapsed < 120) return 3;
+    if (elapsed < 600) return 4;
+    if (elapsed < 1200) return 5;
+    if (elapsed < 1800) return 6;
+    return 7;
+  }, []);
 
   const onGenerate = async () => {
-    if (!user) {
-      toast.error("You must be signed in to queue a job.");
+    if (!RUNPOD_API_KEY || !RUNPOD_ENDPOINT_ID) {
+      toast.error("RunPod API key or endpoint not configured. Check your .env file.");
       return;
     }
-    setSubmitting(true);
+    if (!refImage) {
+      toast.error("Upload a reference image first.");
+      return;
+    }
+    if (!scenes.every((s) => s.prompt.trim().length > 0)) {
+      toast.error("Fill in all scene prompts before generating.");
+      return;
+    }
+
+    setJob({ ...INITIAL_JOB, status: "submitting", progressLabel: "Submitting job to RunPod…" });
+
+    // Upload image to ComfyUI happens on the worker side — we just pass the URL.
+    // If the image is a local file (blob URL) we need to get the public URL.
+    // For now we assume the user has a hosted URL — if they uploaded locally
+    // we convert to base64 and pass via the images[] input.
+    let imageInput: { image_url?: string; images?: { name: string; image: string }[] } = {};
+
+    if (refImage.url.startsWith("blob:")) {
+      // Convert local file to base64
+      const b64 = await new Promise<string>((res, rej) => {
+        const reader = new FileReader();
+        reader.onload = () => res((reader.result as string).split(",")[1]);
+        reader.onerror = rej;
+        reader.readAsDataURL(refImage.file);
+      });
+      imageInput = { images: [{ name: refImage.name, image: b64 }] };
+    } else {
+      imageInput = { image_url: refImage.url };
+    }
+
+    const input = {
+      ...imageInput,
+      fps,
+      frames_per_scene: framesPerScene,
+      num_scenes: scenes.length,
+      sampling_steps: samplingSteps,
+      prompts: scenes.map((s) => s.prompt),
+      negative_prompt: negative,
+    };
+
     try {
-      await generationService.enqueue({
-        type: "video",
-        character_id: lila?.id ?? null,
-        created_by: user.id,
+      const jobId = await submitJob(input);
+      startTimeRef.current = Date.now();
+
+      setJob((j) => ({
+        ...j,
         status: "queued",
-        input_payload: {
-          fps,
-          framesPerScene,
-          samplingSteps,
-          numScenes: scenes.length,
-          totalFrames,
-          durationSec,
-          referenceImageName: refImage?.name ?? null,
-          scenes: scenes.map((s) => s.prompt),
-          negativePrompt: negative,
-        },
-      });
-      toast.success("Generation job queued", {
-        description: `${scenes.length} scenes · ${totalFrames.toLocaleString()} frames · ~${durationSec.toFixed(1)}s`,
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Failed to queue job";
+        jobId,
+        progress: 8,
+        progressLabel: "Job queued, waiting for worker…",
+      }));
+
+      toast.success("Job submitted", { description: `ID: ${jobId.slice(0, 12)}…` });
+
+      // Elapsed timer
+      timerRef.current = setInterval(() => {
+        const elapsed = Math.round((Date.now() - startTimeRef.current) / 1000);
+        setJob((j) => ({ ...j, elapsedSec: elapsed }));
+      }, 1000);
+
+      // Poll every 4 seconds
+      pollRef.current = setInterval(async () => {
+        try {
+          const data = await pollJobStatus(jobId);
+          const elapsed = Math.round((Date.now() - startTimeRef.current) / 1000);
+
+          if (data.status === "IN_QUEUE") {
+            setJob((j) => ({
+              ...j,
+              status: "queued",
+              progress: 8,
+              progressLabel: "Waiting in queue…",
+            }));
+          } else if (data.status === "IN_PROGRESS") {
+            const stepIdx = getStepFromElapsed(elapsed, "in_progress");
+            const pct = Math.min(85, 12 + stepIdx * 11);
+            setJob((j) => ({
+              ...j,
+              status: "in_progress",
+              progress: pct,
+              progressLabel: GENERATION_STEPS[stepIdx] ?? "Generating…",
+            }));
+          } else if (data.status === "COMPLETED") {
+            stopPoll();
+            stopTimer();
+            const out = data.output;
+            const videoUrl = out?.final_video_url;
+            if (!videoUrl) {
+              setJob((j) => ({
+                ...j,
+                status: "failed",
+                error: "Job completed but no video URL returned.",
+              }));
+              return;
+            }
+            setJob((j) => ({
+              ...j,
+              status: "completed",
+              progress: 100,
+              progressLabel: "Complete!",
+              finalVideoUrl: videoUrl,
+              chunkUrls: out?.chunk_urls ?? [],
+            }));
+            toast.success("Video ready!", { description: "Your video has been generated." });
+          } else if (data.status === "FAILED") {
+            stopPoll();
+            stopTimer();
+            const errMsg = data.error ?? data.output?.error ?? "Job failed on RunPod worker";
+            setJob((j) => ({ ...j, status: "failed", error: errMsg }));
+            toast.error("Generation failed", { description: errMsg });
+          }
+        } catch (e) {
+          // Poll errors are transient — keep polling
+          console.warn("Poll error:", e);
+        }
+      }, 4000);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Failed to submit job";
+      setJob((j) => ({ ...j, status: "failed", error: msg }));
       toast.error(msg);
-    } finally {
-      setSubmitting(false);
     }
   };
 
-  const canGenerate = !!refImage && scenes.every((s) => s.prompt.trim().length > 0);
+  const canGenerate =
+    !!refImage &&
+    scenes.every((s) => s.prompt.trim().length > 0) &&
+    job.status !== "submitting" &&
+    job.status !== "queued" &&
+    job.status !== "in_progress";
+
+  const isRunning =
+    job.status === "submitting" ||
+    job.status === "queued" ||
+    job.status === "in_progress";
 
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
       <div className="flex flex-col gap-6 lg:col-span-2">
         <ReferenceImageCard image={refImage} setImage={setRefImage} />
         <SettingsCard
-          fps={fps}
-          setFps={setFps}
-          framesPerScene={framesPerScene}
-          setFramesPerScene={setFramesPerScene}
+          fps={fps} setFps={setFps}
+          framesPerScene={framesPerScene} setFramesPerScene={setFramesPerScene}
           numScenes={scenes.length}
-          samplingSteps={samplingSteps}
-          setSamplingSteps={setSamplingSteps}
+          samplingSteps={samplingSteps} setSamplingSteps={setSamplingSteps}
         />
         <SceneBuilder
           scenes={scenes}
@@ -240,6 +459,26 @@ function VideoGenerationTab() {
           moveScene={moveScene}
         />
         <NegativePromptCard value={negative} onChange={setNegative} />
+
+        {/* Progress card — shown while running */}
+        {isRunning && (
+          <JobProgressCard job={job} totalScenes={scenes.length} />
+        )}
+
+        {/* Result card — shown when done */}
+        {job.status === "completed" && job.finalVideoUrl && (
+          <VideoResultCard
+            url={job.finalVideoUrl}
+            chunkUrls={job.chunkUrls}
+            elapsedSec={job.elapsedSec}
+            onReset={() => setJob(INITIAL_JOB)}
+          />
+        )}
+
+        {/* Error card */}
+        {job.status === "failed" && job.error && (
+          <ErrorCard message={job.error} onRetry={() => setJob(INITIAL_JOB)} />
+        )}
       </div>
 
       <div className="flex flex-col gap-6 lg:col-span-1">
@@ -252,7 +491,8 @@ function VideoGenerationTab() {
           totalFrames={totalFrames}
           durationSec={durationSec}
           canGenerate={canGenerate}
-          submitting={submitting}
+          isRunning={isRunning}
+          job={job}
           onGenerate={onGenerate}
         />
       </div>
@@ -260,26 +500,24 @@ function VideoGenerationTab() {
   );
 }
 
-/* ---------- Reference Image ---------- */
-
+// ---------------------------------------------------------------------------
+// Reference Image Card
+// ---------------------------------------------------------------------------
 function ReferenceImageCard({
   image,
   setImage,
 }: {
-  image: { url: string; name: string } | null;
-  setImage: (v: { url: string; name: string } | null) => void;
+  image: { url: string; name: string; file: File } | null;
+  setImage: (v: { url: string; name: string; file: File } | null) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
 
   const handleFile = (file: File | undefined | null) => {
     if (!file) return;
-    if (!file.type.startsWith("image/")) {
-      toast.error("Please upload an image file");
-      return;
-    }
+    if (!file.type.startsWith("image/")) { toast.error("Please upload an image file"); return; }
     const url = URL.createObjectURL(file);
-    setImage({ url, name: file.name });
+    setImage({ url, name: file.name, file });
   };
 
   return (
@@ -289,7 +527,7 @@ function ReferenceImageCard({
           <div>
             <CardTitle className="font-display text-lg">Reference Image</CardTitle>
             <CardDescription>
-              Upload the reference image that will be used to maintain character consistency.
+              Upload the starting image — the pipeline uses it to maintain character consistency across all scenes.
             </CardDescription>
           </div>
           <span className="rounded-full border border-border bg-card/60 px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
@@ -302,20 +540,11 @@ function ReferenceImageCard({
           <button
             type="button"
             onClick={() => inputRef.current?.click()}
-            onDragOver={(e) => {
-              e.preventDefault();
-              setDragging(true);
-            }}
+            onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
             onDragLeave={() => setDragging(false)}
-            onDrop={(e) => {
-              e.preventDefault();
-              setDragging(false);
-              handleFile(e.dataTransfer.files?.[0]);
-            }}
+            onDrop={(e) => { e.preventDefault(); setDragging(false); handleFile(e.dataTransfer.files?.[0]); }}
             className={`group relative flex h-56 w-full flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed transition-colors ${
-              dragging
-                ? "border-primary bg-primary/5"
-                : "border-border bg-muted/20 hover:bg-muted/30"
+              dragging ? "border-primary bg-primary/5" : "border-border bg-muted/20 hover:bg-muted/30"
             }`}
           >
             <div className="grid h-12 w-12 place-items-center rounded-full bg-primary/10 text-primary">
@@ -323,117 +552,61 @@ function ReferenceImageCard({
             </div>
             <div className="text-center">
               <p className="text-sm font-medium">Drop image here or click to upload</p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                PNG, JPG, or WEBP · up to 20MB
-              </p>
+              <p className="mt-1 text-xs text-muted-foreground">PNG, JPG, or WEBP · up to 20MB</p>
             </div>
           </button>
         ) : (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_auto]">
             <div className="relative overflow-hidden rounded-xl border border-border bg-muted/20">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={image.url}
-                alt={image.name}
-                className="h-56 w-full object-cover"
-              />
+              <img src={image.url} alt={image.name} className="h-56 w-full object-cover" />
             </div>
             <div className="flex flex-col justify-between gap-3 md:w-56">
               <div>
-                <p className="text-xs uppercase tracking-wider text-muted-foreground">
-                  Selected
-                </p>
+                <p className="text-xs uppercase tracking-wider text-muted-foreground">Selected</p>
                 <p className="mt-1 truncate text-sm font-medium">{image.name}</p>
                 <p className="mt-2 inline-flex items-center gap-1 rounded-full bg-success/10 px-2 py-0.5 text-[11px] text-success">
                   <Check className="h-3 w-3" /> Ready
                 </p>
               </div>
               <div className="flex flex-col gap-2">
-                <Button
-                  variant="secondary"
-                  className="justify-start gap-2"
-                  onClick={() => inputRef.current?.click()}
-                >
+                <Button variant="secondary" className="justify-start gap-2" onClick={() => inputRef.current?.click()}>
                   <Replace className="h-4 w-4" /> Replace image
                 </Button>
-                <Button
-                  variant="ghost"
-                  className="justify-start gap-2 text-destructive hover:text-destructive"
-                  onClick={() => setImage(null)}
-                >
+                <Button variant="ghost" className="justify-start gap-2 text-destructive hover:text-destructive" onClick={() => setImage(null)}>
                   <X className="h-4 w-4" /> Remove image
                 </Button>
               </div>
             </div>
           </div>
         )}
-        <input
-          ref={inputRef}
-          type="file"
-          accept="image/*"
-          className="hidden"
-          onChange={(e) => handleFile(e.target.files?.[0])}
-        />
+        <input ref={inputRef} type="file" accept="image/*" className="hidden" onChange={(e) => handleFile(e.target.files?.[0])} />
       </CardContent>
     </Card>
   );
 }
 
-/* ---------- Settings ---------- */
-
-function NumberField({
-  label,
-  value,
-  onChange,
-  recommended,
-  min = 1,
-}: {
-  label: string;
-  value: number;
-  onChange: (n: number) => void;
-  recommended: number;
-  min?: number;
+// ---------------------------------------------------------------------------
+// Settings Card
+// ---------------------------------------------------------------------------
+function NumberField({ label, value, onChange, recommended, min = 1 }: {
+  label: string; value: number; onChange: (n: number) => void; recommended: number; min?: number;
 }) {
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between">
         <Label className="text-xs font-medium text-muted-foreground">{label}</Label>
-        <button
-          type="button"
-          onClick={() => onChange(recommended)}
-          className="text-[10px] uppercase tracking-wider text-muted-foreground transition-colors hover:text-primary"
-        >
+        <button type="button" onClick={() => onChange(recommended)} className="text-[10px] uppercase tracking-wider text-muted-foreground transition-colors hover:text-primary">
           Rec · {recommended}
         </button>
       </div>
-      <Input
-        type="number"
-        min={min}
-        value={value}
-        onChange={(e) =>
-          onChange(Math.max(min, Number(e.target.value) || min))
-        }
-      />
+      <Input type="number" min={min} value={value} onChange={(e) => onChange(Math.max(min, Number(e.target.value) || min))} />
     </div>
   );
 }
 
-function SettingsCard({
-  fps,
-  setFps,
-  framesPerScene,
-  setFramesPerScene,
-  numScenes,
-  samplingSteps,
-  setSamplingSteps,
-}: {
-  fps: number;
-  setFps: (n: number) => void;
-  framesPerScene: number;
-  setFramesPerScene: (n: number) => void;
-  numScenes: number;
-  samplingSteps: number;
-  setSamplingSteps: (n: number) => void;
+function SettingsCard({ fps, setFps, framesPerScene, setFramesPerScene, numScenes, samplingSteps, setSamplingSteps }: {
+  fps: number; setFps: (n: number) => void; framesPerScene: number; setFramesPerScene: (n: number) => void;
+  numScenes: number; samplingSteps: number; setSamplingSteps: (n: number) => void;
 }) {
   return (
     <Card>
@@ -441,61 +614,35 @@ function SettingsCard({
         <div className="flex items-start justify-between gap-3">
           <div>
             <CardTitle className="font-display text-lg">Generation Settings</CardTitle>
-            <CardDescription>
-              Tune the pipeline. Recommended values are pre-filled for the RunPod default profile.
-            </CardDescription>
+            <CardDescription>Recommended values are pre-filled for the RunPod pipeline.</CardDescription>
           </div>
-          <span className="rounded-full border border-border bg-card/60 px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">
-            Step 2
-          </span>
+          <span className="rounded-full border border-border bg-card/60 px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">Step 2</span>
         </div>
       </CardHeader>
       <CardContent>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <NumberField label="FPS" value={fps} onChange={setFps} recommended={RECOMMENDED.fps} />
-          <NumberField
-            label="Frames Per Scene"
-            value={framesPerScene}
-            onChange={setFramesPerScene}
-            recommended={RECOMMENDED.framesPerScene}
-          />
+          <NumberField label="Frames Per Scene" value={framesPerScene} onChange={setFramesPerScene} recommended={RECOMMENDED.framesPerScene} />
           <div className="space-y-1.5">
             <div className="flex items-center justify-between">
-              <Label className="text-xs font-medium text-muted-foreground">
-                Number of Scenes
-              </Label>
-              <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                Auto
-              </span>
+              <Label className="text-xs font-medium text-muted-foreground">Number of Scenes</Label>
+              <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Auto</span>
             </div>
             <Input type="number" value={numScenes} readOnly className="opacity-70" />
           </div>
-          <NumberField
-            label="Sampling Steps"
-            value={samplingSteps}
-            onChange={setSamplingSteps}
-            recommended={RECOMMENDED.samplingSteps}
-          />
+          <NumberField label="Sampling Steps" value={samplingSteps} onChange={setSamplingSteps} recommended={RECOMMENDED.samplingSteps} />
         </div>
       </CardContent>
     </Card>
   );
 }
 
-/* ---------- Scene Builder ---------- */
-
-function SceneBuilder({
-  scenes,
-  addScene,
-  removeScene,
-  updateScene,
-  moveScene,
-}: {
-  scenes: Scene[];
-  addScene: () => void;
-  removeScene: (id: string) => void;
-  updateScene: (id: string, p: string) => void;
-  moveScene: (id: string, d: -1 | 1) => void;
+// ---------------------------------------------------------------------------
+// Scene Builder
+// ---------------------------------------------------------------------------
+function SceneBuilder({ scenes, addScene, removeScene, updateScene, moveScene }: {
+  scenes: Scene[]; addScene: () => void; removeScene: (id: string) => void;
+  updateScene: (id: string, p: string) => void; moveScene: (id: string, d: -1 | 1) => void;
 }) {
   const configuredCount = scenes.filter((s) => s.prompt.trim().length > 0).length;
   return (
@@ -504,9 +651,7 @@ function SceneBuilder({
         <div className="flex items-start justify-between gap-3">
           <div>
             <CardTitle className="font-display text-lg">Scene Builder</CardTitle>
-            <CardDescription>
-              Each scene becomes a clip stitched into the final video.
-            </CardDescription>
+            <CardDescription>Each scene becomes a clip stitched into the final video.</CardDescription>
           </div>
           <div className="flex items-center gap-2">
             <span className="hidden rounded-full border border-border bg-card/60 px-2.5 py-1 text-xs text-muted-foreground sm:inline">
@@ -520,59 +665,25 @@ function SceneBuilder({
       </CardHeader>
       <CardContent className="space-y-3">
         {scenes.map((scene, idx) => (
-          <div
-            key={scene.id}
-            className="rounded-xl border border-border bg-card/40 p-4 transition-colors hover:border-primary/40"
-          >
+          <div key={scene.id} className="rounded-xl border border-border bg-card/40 p-4 transition-colors hover:border-primary/40">
             <div className="flex items-start gap-3">
               <div className="flex flex-col items-center gap-1">
                 <div className="grid h-9 w-9 place-items-center rounded-lg bg-gradient-to-br from-primary/20 to-chart-4/20 font-display text-sm font-semibold text-primary">
                   {String(idx + 1).padStart(2, "0")}
                 </div>
                 <div className="flex flex-col">
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    className="h-6 w-6"
-                    onClick={() => moveScene(scene.id, -1)}
-                    disabled={idx === 0}
-                  >
-                    <ArrowUp className="h-3.5 w-3.5" />
-                  </Button>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    className="h-6 w-6"
-                    onClick={() => moveScene(scene.id, 1)}
-                    disabled={idx === scenes.length - 1}
-                  >
-                    <ArrowDown className="h-3.5 w-3.5" />
-                  </Button>
+                  <Button size="icon" variant="ghost" className="h-6 w-6" onClick={() => moveScene(scene.id, -1)} disabled={idx === 0}><ArrowUp className="h-3.5 w-3.5" /></Button>
+                  <Button size="icon" variant="ghost" className="h-6 w-6" onClick={() => moveScene(scene.id, 1)} disabled={idx === scenes.length - 1}><ArrowDown className="h-3.5 w-3.5" /></Button>
                 </div>
               </div>
               <div className="flex-1 space-y-2">
                 <div className="flex items-center justify-between">
-                  <Label className="text-xs font-medium text-muted-foreground">
-                    Scene {idx + 1} prompt
-                  </Label>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                    onClick={() => removeScene(scene.id)}
-                    disabled={scenes.length <= 1}
-                    aria-label="Remove scene"
-                  >
+                  <Label className="text-xs font-medium text-muted-foreground">Scene {idx + 1} prompt</Label>
+                  <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-destructive" onClick={() => removeScene(scene.id)} disabled={scenes.length <= 1} aria-label="Remove scene">
                     <Trash2 className="h-4 w-4" />
                   </Button>
                 </div>
-                <Textarea
-                  rows={2}
-                  placeholder="Describe the action, framing, lighting, and mood…"
-                  value={scene.prompt}
-                  onChange={(e) => updateScene(scene.id, e.target.value)}
-                  className="resize-none"
-                />
+                <Textarea rows={2} placeholder="Describe the action, framing, lighting, and mood…" value={scene.prompt} onChange={(e) => updateScene(scene.id, e.target.value)} className="resize-none" />
               </div>
             </div>
           </div>
@@ -582,46 +693,179 @@ function SceneBuilder({
   );
 }
 
-/* ---------- Negative Prompt ---------- */
-
-function NegativePromptCard({
-  value,
-  onChange,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-}) {
+// ---------------------------------------------------------------------------
+// Negative Prompt
+// ---------------------------------------------------------------------------
+function NegativePromptCard({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   return (
     <Card>
       <CardHeader>
         <CardTitle className="font-display text-lg">Negative Prompt</CardTitle>
-        <CardDescription>
-          Describe elements that should not appear in the generated video.
-        </CardDescription>
+        <CardDescription>Elements that should not appear in the generated video.</CardDescription>
       </CardHeader>
       <CardContent>
-        <Textarea
-          rows={4}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder="e.g. blurry, low quality, watermark, distorted hands…"
-        />
+        <Textarea rows={3} value={value} onChange={(e) => onChange(e.target.value)} placeholder="e.g. blurry, low quality, watermark, distorted hands…" />
       </CardContent>
     </Card>
   );
 }
 
-/* ---------- Summary Panel ---------- */
+// ---------------------------------------------------------------------------
+// Job Progress Card
+// ---------------------------------------------------------------------------
+function JobProgressCard({ job, totalScenes }: { job: JobState; totalScenes: number }) {
+  const stepIdx = GENERATION_STEPS.indexOf(job.progressLabel);
+  const m = Math.floor(job.elapsedSec / 60);
+  const s = job.elapsedSec % 60;
 
-function SummaryRow({
-  label,
-  value,
-  mono,
-}: {
-  label: string;
-  value: React.ReactNode;
-  mono?: boolean;
+  return (
+    <Card className="border-primary/30 bg-primary/5">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Loader2 className="h-4 w-4 animate-spin text-primary" />
+            <CardTitle className="font-display text-lg">Generating Video</CardTitle>
+          </div>
+          <div className="flex items-center gap-2">
+            <Clock className="h-3.5 w-3.5 text-muted-foreground" />
+            <span className="font-mono text-xs text-muted-foreground">
+              {m}m {String(s).padStart(2, "0")}s
+            </span>
+            <Badge variant="outline" className="text-xs">
+              {job.status === "queued" ? "Queued" : job.status === "submitting" ? "Submitting" : "Running"}
+            </Badge>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div>
+          <div className="mb-2 flex justify-between text-xs text-muted-foreground">
+            <span>{job.progressLabel || "Initialising…"}</span>
+            <span>{job.progress}%</span>
+          </div>
+          <Progress value={job.progress} className="h-2" />
+        </div>
+
+        <div className="space-y-1">
+          {GENERATION_STEPS.map((step, i) => {
+            const isDone = i < stepIdx;
+            const isActive = i === stepIdx;
+            return (
+              <div key={step} className={`flex items-center gap-2.5 rounded-md px-2 py-1.5 text-xs transition-colors ${isActive ? "bg-primary/10 font-medium text-primary" : isDone ? "text-muted-foreground" : "text-muted-foreground/40"}`}>
+                <div className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${isDone ? "bg-success" : isActive ? "animate-pulse bg-primary" : "bg-muted-foreground/20"}`} />
+                {step}
+              </div>
+            );
+          })}
+        </div>
+
+        {job.jobId && (
+          <p className="text-[11px] text-muted-foreground">
+            Job ID: <span className="font-mono">{job.jobId}</span>
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Video Result Card
+// ---------------------------------------------------------------------------
+function VideoResultCard({ url, chunkUrls, elapsedSec, onReset }: {
+  url: string; chunkUrls: string[]; elapsedSec: number; onReset: () => void;
 }) {
+  const m = Math.floor(elapsedSec / 60);
+  const s = elapsedSec % 60;
+
+  const copyUrl = () => {
+    navigator.clipboard.writeText(url).then(() => toast.success("URL copied to clipboard"));
+  };
+
+  return (
+    <Card className="border-success/30">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Check className="h-4 w-4 text-success" />
+            <CardTitle className="font-display text-lg">Video Ready</CardTitle>
+          </div>
+          <Badge variant="outline" className="border-success/40 text-success text-xs">
+            Generated in {m}m {s}s
+          </Badge>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <video src={url} controls playsInline className="w-full rounded-xl border border-border bg-black" />
+
+        <div className="flex flex-wrap gap-2">
+          <Button asChild variant="default" className="gap-2 flex-1">
+            <a href={url} download="lila_generated_video.mp4">
+              <Download className="h-4 w-4" /> Download video
+            </a>
+          </Button>
+          <Button variant="outline" className="gap-2" onClick={copyUrl}>
+            <Copy className="h-4 w-4" /> Copy URL
+          </Button>
+          <Button variant="outline" className="gap-2" asChild>
+            <a href={url} target="_blank" rel="noopener noreferrer">
+              <ExternalLink className="h-4 w-4" /> Open
+            </a>
+          </Button>
+        </div>
+
+        <div className="rounded-lg border border-border bg-muted/20 px-3 py-2">
+          <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Supabase URL</p>
+          <p className="break-all font-mono text-xs text-muted-foreground">{url}</p>
+        </div>
+
+        {chunkUrls.length > 1 && (
+          <details className="text-xs text-muted-foreground">
+            <summary className="cursor-pointer hover:text-foreground">
+              {chunkUrls.length} batch chunks
+            </summary>
+            <div className="mt-2 space-y-1 pl-2">
+              {chunkUrls.map((u, i) => (
+                <a key={i} href={u} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 hover:text-primary">
+                  <ExternalLink className="h-3 w-3" /> Batch {i + 1}
+                </a>
+              ))}
+            </div>
+          </details>
+        )}
+
+        <Button variant="ghost" className="w-full text-muted-foreground" onClick={onReset}>
+          Generate another video
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Error Card
+// ---------------------------------------------------------------------------
+function ErrorCard({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <Card className="border-destructive/30 bg-destructive/5">
+      <CardContent className="flex items-start gap-3 py-5">
+        <AlertCircle className="h-5 w-5 flex-shrink-0 text-destructive mt-0.5" />
+        <div className="flex-1">
+          <p className="text-sm font-medium text-destructive">Generation failed</p>
+          <p className="mt-1 text-xs text-muted-foreground">{message}</p>
+          <Button variant="outline" size="sm" className="mt-3" onClick={onRetry}>
+            Dismiss and retry
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Summary Panel
+// ---------------------------------------------------------------------------
+function SummaryRow({ label, value, mono }: { label: string; value: React.ReactNode; mono?: boolean }) {
   return (
     <div className="flex items-center justify-between gap-3 py-2">
       <span className="text-xs text-muted-foreground">{label}</span>
@@ -630,28 +874,10 @@ function SummaryRow({
   );
 }
 
-function SummaryPanel({
-  refImage,
-  totalScenes,
-  fps,
-  framesPerScene,
-  samplingSteps,
-  totalFrames,
-  durationSec,
-  canGenerate,
-  submitting,
-  onGenerate,
-}: {
-  refImage: { url: string; name: string } | null;
-  totalScenes: number;
-  fps: number;
-  framesPerScene: number;
-  samplingSteps: number;
-  totalFrames: number;
-  durationSec: number;
-  canGenerate: boolean;
-  submitting: boolean;
-  onGenerate: () => void;
+function SummaryPanel({ refImage, totalScenes, fps, framesPerScene, samplingSteps, totalFrames, durationSec, canGenerate, isRunning, job, onGenerate }: {
+  refImage: { url: string; name: string } | null; totalScenes: number; fps: number;
+  framesPerScene: number; samplingSteps: number; totalFrames: number; durationSec: number;
+  canGenerate: boolean; isRunning: boolean; job: JobState; onGenerate: () => void;
 }) {
   return (
     <Card className="sticky top-24 overflow-hidden">
@@ -661,13 +887,12 @@ function SummaryPanel({
           <Sparkles className="h-4 w-4 text-primary" />
           <CardTitle className="font-display text-lg">Generation Summary</CardTitle>
         </div>
-        <CardDescription>Live preview of the job that will be queued.</CardDescription>
+        <CardDescription>Live preview of the job configuration.</CardDescription>
       </CardHeader>
       <CardContent>
         <div className="flex items-center gap-3 rounded-lg border border-border bg-muted/20 p-3">
           <div className="grid h-12 w-12 place-items-center overflow-hidden rounded-md border border-border bg-card">
             {refImage ? (
-              // eslint-disable-next-line @next/next/no-img-element
               <img src={refImage.url} alt="" className="h-full w-full object-cover" />
             ) : (
               <ImageIconLucide className="h-5 w-5 text-muted-foreground" />
@@ -690,30 +915,41 @@ function SummaryPanel({
           <SummaryRow label="FPS" value={fps} mono />
           <SummaryRow label="Frames Per Scene" value={framesPerScene} mono />
           <SummaryRow label="Sampling Steps" value={samplingSteps} mono />
+          <SummaryRow label="Total Frames" value={totalFrames.toLocaleString()} mono />
+          <SummaryRow label="Est. Duration" value={`~${durationSec.toFixed(1)}s`} mono />
           <SummaryRow
-            label="Total Frames"
-            value={totalFrames.toLocaleString()}
-            mono
-          />
-          <SummaryRow
-            label="Est. Duration"
-            value={`~${durationSec.toFixed(1)}s`}
+            label="Est. Gen Time"
+            value={`~${Math.round(totalScenes * 8 / 60)} min`}
             mono
           />
         </div>
+
+        {isRunning && (
+          <div className="mt-4 space-y-1.5">
+            <div className="flex justify-between text-xs text-muted-foreground">
+              <span>{job.progressLabel || "Running…"}</span>
+              <span>{job.progress}%</span>
+            </div>
+            <Progress value={job.progress} className="h-1.5" />
+          </div>
+        )}
 
         <Button
           size="lg"
           className="mt-5 w-full gap-2 bg-gradient-to-r from-primary to-chart-4 text-primary-foreground shadow-[0_10px_30px_-10px_var(--primary)] hover:opacity-95"
           onClick={onGenerate}
-          disabled={!canGenerate || submitting}
+          disabled={!canGenerate || isRunning}
         >
-          <Wand2 className="h-4 w-4" />
-          {submitting ? "Queueing job…" : "Generate Video"}
+          {isRunning ? (
+            <><Loader2 className="h-4 w-4 animate-spin" /> Generating…</>
+          ) : (
+            <><Wand2 className="h-4 w-4" /> Generate Video</>
+          )}
         </Button>
-        {!canGenerate && (
+
+        {!canGenerate && !isRunning && (
           <p className="mt-2 text-center text-[11px] text-muted-foreground">
-            Add a reference image and fill every scene prompt to enable.
+            {!refImage ? "Upload a reference image to enable." : "Fill every scene prompt to enable."}
           </p>
         )}
       </CardContent>
@@ -721,8 +957,9 @@ function SummaryPanel({
   );
 }
 
-/* ---------- Image Tab Placeholder ---------- */
-
+// ---------------------------------------------------------------------------
+// Image Tab Placeholder
+// ---------------------------------------------------------------------------
 function ImageGenerationPlaceholder() {
   return (
     <Card className="border-dashed">
@@ -734,8 +971,7 @@ function ImageGenerationPlaceholder() {
           Image Generation Module — Coming Soon
         </h3>
         <p className="max-w-md text-sm text-muted-foreground">
-          The image batch composer is on the roadmap. For now, dispatch single frames via the
-          Video tab using a single scene.
+          The image batch composer is on the roadmap. For now, dispatch single frames via the Video tab using a single scene.
         </p>
       </CardContent>
     </Card>
