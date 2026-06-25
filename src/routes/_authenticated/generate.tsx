@@ -475,7 +475,20 @@ function ImageGenerationTab() {
         } else if (data.status === "COMPLETED") {
           stopPoll(); stopTimer();
           const out = data.output;
-          const imgUrl = out?.image_url ?? out?.[0]?.url ?? out?.url ?? null;
+
+          console.log("RunPod image output:", out);
+
+          const imgUrl =
+            out?.image_url ||
+            out?.url ||
+            out?.result ||
+            out?.images?.[0]?.image_url ||
+            out?.images?.[0]?.url ||
+            out?.images?.[0]?.image ||
+            out?.[0]?.image_url ||
+            out?.[0]?.url ||
+            out?.[0]?.image ||
+            null;
           if (!imgUrl) { setJob((j) => ({ ...j, status: "failed", error: "No image URL in response." })); return; }
           setJob((j) => ({ ...j, status: "completed", resultUrl: imgUrl }));
           toast.success("Image ready!");
