@@ -530,9 +530,10 @@ function ImageGenerationTab() {
     try {
       // FIX 2 — Build image input exactly like the video tab
       let imageInput: { image_url?: string; images?: { name: string; image: string }[] } = {};
+      // ImageGenerationTab — onGenerate
       if (refImage.url.startsWith("blob:")) {
         const b64 = await fileToBase64(refImage.file);
-        imageInput = { images: [{ name: refImage.name, image: b64 }] };
+        imageInput = { images: [b64] };  // ← plain string, not object
       } else {
         imageInput = { image_url: refImage.url };
       }
