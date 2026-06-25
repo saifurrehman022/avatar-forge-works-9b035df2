@@ -1,20 +1,17 @@
 import { createFileRoute, redirect } from "@tanstack/react-router";
 
 export const Route = createFileRoute("/fanvue-callback")({
-  beforeLoad: ({ location }) => {
-    const url = new URL(location.href);
-    const code = url.searchParams.get("code");
+  beforeLoad: ({ search }) => {
+    const code = search.code;
 
-    if (!code) {
-      throw new Response("Missing code", { status: 400 });
+    if (code) {
+      throw redirect({
+        to: "/generate",
+      });
     }
-
-    throw redirect({
-      to: "/generate",
-    });
   },
 });
 
 export default function FanvueCallback() {
-  return <div>Connecting Fanvue...</div>;
+  return <div>Waiting for Fanvue authentication...</div>;
 }
