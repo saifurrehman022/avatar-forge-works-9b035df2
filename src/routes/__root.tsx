@@ -1,19 +1,9 @@
-import {
-  Outlet,
-  createRootRoute,
-} from "@tanstack/react-router";
-
-import { Toaster } from "@/components/ui/sonner";
+import { createRootRoute, Outlet } from "@tanstack/react-router";
 
 export const Route = createRootRoute({
-  component: RootLayout,
+  component: RootComponent,
 });
 
-function RootLayout() {
-  return (
-    <div className="min-h-screen bg-background text-foreground">
-      <Outlet />
-      <Toaster />
-    </div>
-  );
+function RootComponent() {
+  return <Outlet />;
 }
