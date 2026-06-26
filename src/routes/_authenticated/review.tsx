@@ -118,72 +118,117 @@ const NEG_DEFAULT = "low quality, blurry, extra limbs, distorted face, watermark
 const PLACEHOLDER_IMG = "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=800&q=80";
 
 // ---------- Data Loading ----------
+// Queries images + videos directly (same as library) so ALL generated content
+// appears here automatically. review_queue rows are merged in for status/notes.
 
 async function fetchQueue(): Promise<ReviewItem[]> {
-  const { data: rows, error } = await supabase
-    .from("review_queue")
-    .select("*")
-    .order("created_at", { ascending: false });
-  if (error) throw error;
-
-  const imageIds = (rows ?? []).filter((r) => r.content_type === "image").map((r) => r.content_id);
-  const videoIds = (rows ?? []).filter((r) => r.content_type === "video").map((r) => r.content_id);
-
-  const [imgRes, vidRes, charRes] = await Promise.all([
-    imageIds.length
-      ? supabase.from("images").select("id, image_url, prompt, character_id, created_at, status").in("id", imageIds)
-      : Promise.resolve({ data: [], error: null } as const),
-    videoIds.length
-      ? supabase.from("videos").select("id, video_url, prompt, scene_prompts, character_id, created_at, status").in("id", videoIds)
-      : Promise.resolve({ data: [], error: null } as const),
+  const [imgRes, vidRes, queueRes, charRes] = await Promise.all([
+    supabase
+      .from("images")
+      .select("id, image_url, prompt, character_id, created_at, status, publish_status")
+      .order("created_at", { ascending: false }),
+    supabase
+      .from("videos")
+      .select("id, video_url, prompt, scene_prompts, character_id, created_at, status, publish_status")
+      .order("created_at", { ascending: false }),
+    supabase.from("review_queue").select("*"),
     supabase.from("characters").select("id, name, reference_image_url"),
   ]);
 
-  const imgMap = new Map((imgRes.data ?? []).map((i: any) => [i.id, i]));
-  const vidMap = new Map((vidRes.data ?? []).map((v: any) => [v.id, v]));
   const charMap = new Map((charRes.data ?? []).map((c: any) => [c.id, c]));
 
-  return (rows ?? []).map((r: any): ReviewItem => {
-    const isVideo = r.content_type === "video";
-    const src: any = isVideo ? vidMap.get(r.content_id) : imgMap.get(r.content_id);
-    const char: any = src?.character_id ? charMap.get(src.character_id) : null;
+  // Lookup: content_id -> queue row (for status, notes, reviewed_at)
+  const queueByContentId = new Map<string, any>();
+  for (const row of queueRes.data ?? []) {
+    queueByContentId.set(row.content_id, row);
+  }
 
-    const scenes: string[] = isVideo && Array.isArray(src?.scene_prompts)
-      ? (src.scene_prompts as unknown[]).map(String)
-      : src?.prompt ? [src.prompt] : [];
+  // Derive status: queue row wins, then content publish_status, then content status
+  function deriveStatus(qRow: any, contentRow: any): ReviewStatus {
+    if (qRow?.status === "scheduled") return "scheduled";
+    if (qRow?.status === "approved")  return "approved";
+    if (qRow?.status === "rejected")  return "rejected";
+    if (contentRow.publish_status === "scheduled") return "scheduled";
+    if (contentRow.status === "approved") return "approved";
+    if (contentRow.status === "rejected") return "rejected";
+    return "pending";
+  }
 
-    const media = isVideo ? src?.video_url : src?.image_url;
-    const thumb = isVideo ? (char?.reference_image_url || media || PLACEHOLDER_IMG) : (media || PLACEHOLDER_IMG);
+  const items: ReviewItem[] = [];
 
-    return {
-      id: r.id,
-      contentId: r.content_id,
-      type: r.content_type,
+  // --- Images ---
+  for (const img of imgRes.data ?? []) {
+    const char: any = img.character_id ? charMap.get(img.character_id) : null;
+    const qRow = queueByContentId.get(img.id);
+    const status = deriveStatus(qRow, img);
+    const media = img.image_url || PLACEHOLDER_IMG;
+    items.push({
+      id: qRow?.id ?? `img-${img.id}`,
+      contentId: img.id,
+      type: "image",
       character: char?.name ?? "Lila",
-      thumbnail: thumb,
-      preview: media || thumb,
+      thumbnail: media,
+      preview: media,
       referenceImage: char?.reference_image_url || PLACEHOLDER_IMG,
-      createdAt: r.created_at,
-      status: r.status as ReviewStatus,
-      jobId: src?.id ?? r.content_id,
+      createdAt: img.created_at,
+      status,
+      jobId: img.id,
+      settings: { fps: 0, framesPerScene: 0, numScenes: 1, samplingSteps: 0 },
+      scenes: img.prompt ? [img.prompt] : ["—"],
+      negativePrompt: NEG_DEFAULT,
+      notes: qRow?.notes ?? undefined,
+      history: [
+        { at: img.created_at, label: "Generated", kind: "generated" as const },
+        ...(qRow ? [{ at: qRow.created_at, label: "In review queue", kind: "queued" as const }] : []),
+        ...(qRow?.reviewed_at ? [{
+          at: qRow.reviewed_at,
+          label: qRow.status === "approved" ? "Approved" : qRow.status === "scheduled" ? "Scheduled" : "Rejected",
+          kind: qRow.status as "approved" | "rejected" | "scheduled",
+        } as HistoryEvent] : []),
+      ],
+    });
+  }
+
+  // --- Videos ---
+  for (const vid of vidRes.data ?? []) {
+    const char: any = vid.character_id ? charMap.get(vid.character_id) : null;
+    const qRow = queueByContentId.get(vid.id);
+    const status = deriveStatus(qRow, vid);
+    const scenes: string[] = Array.isArray(vid.scene_prompts)
+      ? (vid.scene_prompts as unknown[]).map(String)
+      : vid.prompt ? [vid.prompt] : [];
+    const media = vid.video_url || PLACEHOLDER_IMG;
+    items.push({
+      id: qRow?.id ?? `vid-${vid.id}`,
+      contentId: vid.id,
+      type: "video",
+      character: char?.name ?? "Lila",
+      thumbnail: char?.reference_image_url || media,
+      preview: media,
+      referenceImage: char?.reference_image_url || PLACEHOLDER_IMG,
+      createdAt: vid.created_at,
+      status,
+      jobId: vid.id,
       settings: { fps: 16, framesPerScene: 257, numScenes: scenes.length || 1, samplingSteps: 29 },
       scenes: scenes.length ? scenes : ["—"],
       negativePrompt: NEG_DEFAULT,
-      notes: r.notes ?? undefined,
+      notes: qRow?.notes ?? undefined,
       history: [
-        { at: src?.created_at ?? r.created_at, label: "Generated", kind: "generated" },
-        { at: r.created_at, label: "Sent to review", kind: "queued" },
-        ...(r.reviewed_at
-          ? [{
-              at: r.reviewed_at,
-              label: r.status === "approved" ? "Approved" : r.status === "scheduled" ? "Scheduled" : "Rejected",
-              kind: r.status as "approved" | "rejected" | "scheduled",
-            } as HistoryEvent]
-          : []),
+        { at: vid.created_at, label: "Generated", kind: "generated" as const },
+        ...(qRow ? [{ at: qRow.created_at, label: "In review queue", kind: "queued" as const }] : []),
+        ...(qRow?.reviewed_at ? [{
+          at: qRow.reviewed_at,
+          label: qRow.status === "approved" ? "Approved" : qRow.status === "scheduled" ? "Scheduled" : "Rejected",
+          kind: qRow.status as "approved" | "rejected" | "scheduled",
+        } as HistoryEvent] : []),
       ],
-    };
-  });
+    });
+  }
+
+  // Sort newest first
+  return items.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 }
+
 
 // ---------- Helpers ----------
 
@@ -408,6 +453,26 @@ function ReviewPage() {
   const updateLocalStatus = (id: string, status: ReviewStatus, evt: HistoryEvent) =>
     setItems((arr) => arr.map((i) => i.id === id ? { ...i, status, history: [...i.history, evt] } : i));
 
+  // If an item was generated without a queue row (no review_queue insert happened),
+  // we create the row on first action then update it.
+  const ensureQueueRow = async (item: ReviewItem): Promise<string> => {
+    const hasRealId = !item.id.startsWith("img-") && !item.id.startsWith("vid-");
+    if (hasRealId) return item.id; // already a real uuid queue row
+    // Insert a new queue row and return its id
+    const { data, error } = await supabase.from("review_queue").insert({
+      content_type: item.type,
+      content_id: item.contentId,
+      status: "pending",
+      reviewer_id: null,
+      reviewed_at: null,
+      notes: null,
+    }).select("id").single();
+    if (error) throw error;
+    // Update local item id so subsequent actions use the real id
+    setItems((arr) => arr.map((i) => i.id === item.id ? { ...i, id: data.id } : i));
+    return data.id;
+  };
+
   const approve = async (id: string) => {
     const item = items.find((i) => i.id === id);
     if (!item) return;
@@ -417,11 +482,14 @@ function ReviewPage() {
     updateLocalStatus(id, "approved", { at: now, label: "Approved", kind: "approved" });
 
     try {
+      // Ensure a queue row exists, get its real uuid
+      const queueId = await ensureQueueRow(item);
+
       // 1. Update review_queue row
       const { error: rqErr } = await supabase.from("review_queue").update({
         status: "approved",
         reviewed_at: now,
-      }).eq("id", id);
+      }).eq("id", queueId);
       if (rqErr) throw rqErr;
 
       // 2. Update underlying content row status → "approved"
@@ -449,13 +517,14 @@ function ReviewPage() {
     updateLocalStatus(id, "rejected", { at: now, label: "Rejected", kind: "rejected" });
 
     try {
+      const queueId = await ensureQueueRow(item);
+
       const { error: rqErr } = await supabase.from("review_queue").update({
         status: "rejected",
         reviewed_at: now,
-      }).eq("id", id);
+      }).eq("id", queueId);
       if (rqErr) throw rqErr;
 
-      // Also mark underlying content as rejected
       const table = item.type === "image" ? "images" : "videos";
       await supabase.from(table).update({ status: "rejected" }).eq("id", item.contentId);
 
@@ -469,9 +538,12 @@ function ReviewPage() {
   };
 
   const saveNote = async (id: string) => {
+    const item = items.find((i) => i.id === id);
+    if (!item) return;
     setItems((arr) => arr.map((i) => (i.id === id ? { ...i, notes: noteDraft } : i)));
     try {
-      const { error } = await supabase.from("review_queue").update({ notes: noteDraft }).eq("id", id);
+      const queueId = await ensureQueueRow(item);
+      const { error } = await supabase.from("review_queue").update({ notes: noteDraft }).eq("id", queueId);
       if (error) throw error;
       toast.success("Reviewer note saved");
     } catch (e: any) { toast.error(e?.message ?? "Failed to save note"); }
