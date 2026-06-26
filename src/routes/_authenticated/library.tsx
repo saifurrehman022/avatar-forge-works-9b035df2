@@ -1,3 +1,4 @@
+
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -31,6 +32,7 @@ import { DashboardCard } from "@/components/dashboard/dashboard-card";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
@@ -54,6 +56,14 @@ import {
   SheetTitle,
   SheetDescription,
 } from "@/components/ui/sheet";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
@@ -86,7 +96,7 @@ type VideoAsset = {
   id: string;
   kind: "video";
   title: string;
-  createdAt: string; // ISO
+  createdAt: string;
   status: AssetStatus;
   thumbnail: string;
   referenceImage: string;
@@ -164,7 +174,6 @@ function mapVideo(row: DbVideo): VideoAsset {
     durationSec: 0,
   };
 }
-
 
 // ---------- Helpers ----------
 
@@ -249,6 +258,152 @@ function sortAssets<T extends Asset>(items: T[], sort: Sort): T[] {
   return arr;
 }
 
+// ---------- Schedule dialog ----------
+
+type ConnectedAccount = { id: string; name: string; status: string };
+
+function ScheduleDialog({
+  asset,
+  onClose,
+}: {
+  asset: Asset | null;
+  onClose: () => void;
+}) {
+  const qc = useQueryClient();
+  const [date, setDate] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    return d.toISOString().slice(0, 10);
+  });
+  const [time, setTime] = useState("18:00");
+  const [accountId, setAccountId] = useState("");
+  const [accounts, setAccounts] = useState<ConnectedAccount[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!asset) return;
+    supabase
+      .from("connected_accounts")
+      .select("id, account_name, connection_status")
+      .then(({ data }) => {
+        const mapped = (data ?? []).map((a: any) => ({
+          id: a.id,
+          name: a.account_name,
+          status: a.connection_status,
+        }));
+        setAccounts(mapped);
+        if (mapped.length) setAccountId(mapped[0].id);
+      });
+  }, [asset]);
+
+  const submit = async () => {
+    if (!asset) return;
+    setLoading(true);
+    try {
+      const iso = new Date(`${date}T${time}:00`).toISOString();
+      const { data: userRes } = await supabase.auth.getUser();
+
+      // 1. Insert into schedules table
+      const { error: schedErr } = await supabase.from("schedules").insert({
+        content_type: asset.kind,
+        content_id: asset.id,
+        publish_time: iso,
+        platform: "Fanvue",
+        status: "scheduled",
+        created_by: userRes.user?.id ?? null,
+      });
+      if (schedErr) throw schedErr;
+
+      // 2. Attach connected account to the media row
+      if (accountId) {
+        const table = asset.kind === "image" ? "images" : "videos";
+        await supabase
+          .from(table)
+          .update({ connected_account_id: accountId, publish_status: "scheduled" })
+          .eq("id", asset.id);
+      }
+
+      toast.success(`"${asset.title}" scheduled for ${new Date(iso).toLocaleString()}`);
+      qc.invalidateQueries({ queryKey: ["library"] });
+      qc.invalidateQueries({ queryKey: ["schedules"] });
+      onClose();
+    } catch (err: any) {
+      toast.error(err?.message ?? "Failed to schedule");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Dialog open={!!asset} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Schedule content</DialogTitle>
+          <DialogDescription>
+            Pick a date, time and Fanvue account to publish to.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4 py-2">
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <Label>Date</Label>
+              <input
+                type="date"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Time</Label>
+              <input
+                type="time"
+                value={time}
+                onChange={(e) => setTime(e.target.value)}
+                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              />
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            <Label>Publishing account</Label>
+            {accounts.length === 0 ? (
+              <p className="rounded-md border border-dashed border-border bg-muted/30 p-3 text-xs text-muted-foreground">
+                No Fanvue account connected — add one in Settings.
+              </p>
+            ) : (
+              <Select value={accountId} onValueChange={setAccountId}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {accounts.map((a) => (
+                    <SelectItem
+                      key={a.id}
+                      value={a.id}
+                      disabled={a.status !== "connected"}
+                    >
+                      {a.name} {a.status !== "connected" ? "· offline" : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button onClick={submit} disabled={loading} className="gap-2">
+            <CalendarPlus className="h-4 w-4" />
+            {loading ? "Scheduling…" : "Schedule"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 // ---------- Page ----------
 
 function LibraryPage() {
@@ -258,6 +413,7 @@ function LibraryPage() {
   const [dateRange, setDateRange] = useState<DateRange>("all");
   const [sort, setSort] = useState<Sort>("newest");
   const [selected, setSelected] = useState<Asset | null>(null);
+  const [scheduleAsset, setScheduleAsset] = useState<Asset | null>(null);
 
   const qc = useQueryClient();
 
@@ -340,20 +496,47 @@ function LibraryPage() {
     return sortAssets(items, sort);
   }, [images, query, statusFilter, dateRange, sort]);
 
-  const persistStatus = async (asset: Asset, status: AssetStatus) => {
+  // ----- send to review: inserts into review_queue -----
+  const sendToReview = async (asset: Asset) => {
     try {
-      if (status === "scheduled") {
-        const patch = { publish_status: "scheduled" as const };
-        if (asset.kind === "video") await contentService.updateVideo(asset.id, patch);
-        else await contentService.updateImage(asset.id, patch);
-      } else {
-        const patch = { status };
-        if (asset.kind === "video") await contentService.updateVideo(asset.id, patch);
-        else await contentService.updateImage(asset.id, patch);
+      const { data: userRes } = await supabase.auth.getUser();
+
+      // Check if already in queue to avoid duplicates
+      const { data: existing } = await supabase
+        .from("review_queue")
+        .select("id")
+        .eq("content_id", asset.id)
+        .eq("content_type", asset.kind)
+        .maybeSingle();
+
+      if (existing) {
+        toast.info(`"${asset.title}" is already in the review queue`);
+        return;
       }
+
+      const { error } = await supabase.from("review_queue").insert({
+        content_type: asset.kind,
+        content_id: asset.id,
+        status: "pending",
+        reviewer_id: null,
+        reviewed_at: null,
+        notes: null,
+      });
+      if (error) throw error;
+
+      // Also update the asset's status to reflect it's been sent
+      const table = asset.kind === "image" ? "images" : "videos";
+      await supabase.from(table).update({ status: "pending" }).eq("id", asset.id);
+
+      toast.success(`"${asset.title}" sent to review queue`, {
+        action: {
+          label: "View Queue",
+          onClick: () => (window.location.href = "/review"),
+        },
+      });
       qc.invalidateQueries({ queryKey: ["library"] });
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Update failed");
+    } catch (err: any) {
+      toast.error(err?.message ?? "Failed to send to review");
     }
   };
 
@@ -375,12 +558,10 @@ function LibraryPage() {
         setSelected(asset);
         break;
       case "review":
-        persistStatus(asset, "pending");
-        toast.success(`Sent "${asset.title}" to review`);
+        sendToReview(asset);
         break;
       case "schedule":
-        persistStatus(asset, "scheduled");
-        toast.success(`Scheduled "${asset.title}"`);
+        setScheduleAsset(asset);
         break;
       case "delete":
         deleteAsset(asset);
@@ -412,6 +593,12 @@ function LibraryPage() {
                     </p>
                   </div>
                   <div className="mt-4 flex items-center gap-2 md:mt-0">
+                    <Button asChild size="sm" variant="outline">
+                      <Link to="/review">
+                        <ClipboardCheck className="mr-1.5 h-4 w-4" />
+                        Review Queue
+                      </Link>
+                    </Button>
                     <Button asChild size="sm" variant="outline">
                       <Link to="/generate">
                         <Sparkles className="mr-1.5 h-4 w-4" />
@@ -579,6 +766,11 @@ function LibraryPage() {
         onOpenChange={(open) => !open && setSelected(null)}
         onAction={(a) => selected && handleAction(selected, a)}
       />
+
+      <ScheduleDialog
+        asset={scheduleAsset}
+        onClose={() => setScheduleAsset(null)}
+      />
     </SidebarProvider>
   );
 }
@@ -633,11 +825,14 @@ function VideoCard({
       onClick={() => onAction("view")}
     >
       <div className="relative aspect-video w-full overflow-hidden bg-muted">
-        <img
+        <video
           src={video.thumbnail}
-          alt={video.title}
           className="h-full w-full object-cover transition duration-500 group-hover:scale-105"
-          loading="lazy"
+          muted
+          playsInline
+          preload="metadata"
+          onMouseEnter={(e) => e.currentTarget.play().catch(() => {})}
+          onMouseLeave={(e) => { e.currentTarget.pause(); e.currentTarget.currentTime = 0; }}
         />
         <div className="absolute inset-0 bg-gradient-to-t from-background/90 via-background/0 to-background/0" />
         <div className="absolute left-2 top-2">
@@ -777,19 +972,12 @@ function DetailsSheet({
               <div className="relative overflow-hidden rounded-xl border border-border bg-muted">
                 {asset.kind === "video" ? (
                   <div className="relative aspect-video">
-                    <img
+                    <video
                       src={asset.thumbnail}
-                      alt={asset.title}
+                      controls
+                      playsInline
                       className="h-full w-full object-cover"
                     />
-                    <div className="absolute inset-0 grid place-items-center bg-background/30">
-                      <div className="grid h-14 w-14 place-items-center rounded-full bg-primary/90 text-primary-foreground shadow-xl">
-                        <Play className="h-6 w-6" fill="currentColor" />
-                      </div>
-                    </div>
-                    <div className="absolute bottom-2 left-2 rounded-full bg-background/70 px-2 py-0.5 text-[10px] backdrop-blur">
-                      Preview placeholder — RunPod stream not connected
-                    </div>
                   </div>
                 ) : (
                   <img
@@ -865,10 +1053,7 @@ function VideoDetails({ video }: { video: VideoAsset }) {
         </h4>
         <div className="grid grid-cols-2 gap-2">
           <StatRow label="FPS" value={video.settings.fps} />
-          <StatRow
-            label="Frames / scene"
-            value={video.settings.framesPerScene}
-          />
+          <StatRow label="Frames / scene" value={video.settings.framesPerScene} />
           <StatRow label="Scenes" value={video.settings.numScenes} />
           <StatRow label="Sampling steps" value={video.settings.samplingSteps} />
         </div>
@@ -897,7 +1082,7 @@ function VideoDetails({ video }: { video: VideoAsset }) {
           Negative prompt
         </h4>
         <p className="rounded-lg border border-border bg-card/50 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
-          {video.negativePrompt}
+          {video.negativePrompt || "—"}
         </p>
       </section>
     </>
@@ -912,10 +1097,7 @@ function ImageDetails({ image }: { image: ImageAsset }) {
           Generation settings
         </h4>
         <div className="grid grid-cols-2 gap-2">
-          <StatRow
-            label="Resolution"
-            value={`${image.width}×${image.height}`}
-          />
+          <StatRow label="Resolution" value={`${image.width}×${image.height}`} />
           <StatRow label="Sampling steps" value={image.samplingSteps} />
         </div>
       </section>
@@ -934,7 +1116,7 @@ function ImageDetails({ image }: { image: ImageAsset }) {
           Negative prompt
         </h4>
         <p className="rounded-lg border border-border bg-card/50 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
-          {image.negativePrompt}
+          {image.negativePrompt || "—"}
         </p>
       </section>
     </>
