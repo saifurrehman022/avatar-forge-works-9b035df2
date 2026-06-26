@@ -1,3 +1,4 @@
+
 import { createFileRoute } from "@tanstack/react-router";
 import { useMemo, useRef, useState, useEffect, useCallback } from "react";
 import type { ReactNode } from "react";
@@ -57,9 +58,13 @@ export const Route = createFileRoute("/_authenticated/generate")({
 // ---------------------------------------------------------------------------
 const RUNPOD_API_KEY           = import.meta.env.VITE_RUNPOD_API_KEY as string;
 const RUNPOD_ENDPOINT_ID       = import.meta.env.VITE_RUNPOD_ENDPOINT_ID as string;
-const RUNPOD_IMAGE_ENDPOINT_ID = import.meta.env.VITE_RUNPOD_IMAGE_ENDPOINT_ID as string ?? "qwen-image-edit-2511-lora";
+const RUNPOD_IMAGE_ENDPOINT_ID = (import.meta.env.VITE_RUNPOD_IMAGE_ENDPOINT_ID as string) ?? "qwen-image-edit-2511-lora";
 const RUNPOD_BASE              = `https://api.runpod.ai/v2/${RUNPOD_ENDPOINT_ID}`;
 const RUNPOD_IMAGE_BASE        = `https://api.runpod.ai/v2/${RUNPOD_IMAGE_ENDPOINT_ID}`;
+
+// ---- Supabase Storage buckets ----
+const VIDEO_BUCKET = "videos";   // existing bucket — works fine
+const IMAGE_BUCKET = "images";   // create this in Supabase → Storage → New Bucket → "images" → Public ✓
 
 const JOB_STORAGE_KEY       = "lila_video_job";
 const IMAGE_JOB_STORAGE_KEY = "lila_image_job";
@@ -208,36 +213,36 @@ async function fileToBase64(file: File): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// Supabase bucket + DB save helpers
+// Supabase storage upload helper
+// bucket param lets video use VIDEO_BUCKET and image use IMAGE_BUCKET
 // ---------------------------------------------------------------------------
-const SUPABASE_BUCKET = "videos"; // your bucket name
-
 async function uploadToBucketAndGetUrl(
   runpodUrl: string,
   storagePath: string,
-  mimeType: string
+  mimeType: string,
+  bucket: string = VIDEO_BUCKET   // default = videos, images pass IMAGE_BUCKET
 ): Promise<string> {
-  // Step 1 — download the file from RunPod
-  console.log("[bucket] Fetching from RunPod:", runpodUrl);
+  console.log(`[bucket] Fetching from RunPod: ${runpodUrl}`);
   const resp = await fetch(runpodUrl);
   if (!resp.ok) throw new Error(`Failed to fetch output from RunPod (${resp.status} ${resp.statusText})`);
   const blob = await resp.blob();
-  console.log("[bucket] Fetched blob size:", blob.size, "type:", blob.type);
+  console.log(`[bucket] Fetched blob size: ${blob.size} type: ${blob.type}`);
 
-  // Step 2 — upload to Supabase Storage
-  console.log("[bucket] Uploading to Supabase bucket:", SUPABASE_BUCKET, "path:", storagePath);
+  console.log(`[bucket] Uploading to Supabase bucket: ${bucket} path: ${storagePath}`);
   const { error: uploadError } = await supabase.storage
-    .from(SUPABASE_BUCKET)
+    .from(bucket)
     .upload(storagePath, blob, { contentType: mimeType, upsert: true });
 
   if (uploadError) throw new Error(`Supabase Storage upload failed: ${uploadError.message}`);
 
-  // Step 3 — get public URL
-  const { data } = supabase.storage.from(SUPABASE_BUCKET).getPublicUrl(storagePath);
-  console.log("[bucket] Public URL:", data.publicUrl);
+  const { data } = supabase.storage.from(bucket).getPublicUrl(storagePath);
+  console.log(`[bucket] Public URL: ${data.publicUrl}`);
   return data.publicUrl;
 }
 
+// ---------------------------------------------------------------------------
+// DB save helpers
+// ---------------------------------------------------------------------------
 async function saveVideoToLibrary(params: {
   videoUrl: string;
   prompt: string;
@@ -248,7 +253,8 @@ async function saveVideoToLibrary(params: {
 }): Promise<void> {
   const timestamp = Date.now();
   const storagePath = `videos/${timestamp}.mp4`;
-  const publicUrl = await uploadToBucketAndGetUrl(params.videoUrl, storagePath, "video/mp4");
+  // Videos go into VIDEO_BUCKET (default)
+  const publicUrl = await uploadToBucketAndGetUrl(params.videoUrl, storagePath, "video/mp4", VIDEO_BUCKET);
   const { error } = await supabase.from("videos").insert({
     video_url: publicUrl,
     prompt: params.prompt,
@@ -264,8 +270,10 @@ async function saveImageToLibrary(params: {
   prompt: string;
 }): Promise<void> {
   const timestamp = Date.now();
-  const storagePath = `images/${timestamp}.jpg`;
-  const publicUrl = await uploadToBucketAndGetUrl(params.imageUrl, storagePath, "image/jpeg");
+  // FIX: images use IMAGE_BUCKET ("images") not VIDEO_BUCKET ("videos")
+  // No subfolder needed since it's already in the "images" bucket
+  const storagePath = `${timestamp}.jpg`;
+  const publicUrl = await uploadToBucketAndGetUrl(params.imageUrl, storagePath, "image/jpeg", IMAGE_BUCKET);
   const { error } = await supabase.from("images").insert({
     image_url: publicUrl,
     prompt: params.prompt,
@@ -352,7 +360,6 @@ function VideoGenerationTab() {
     return INITIAL_VIDEO_JOB;
   });
 
-  // Keep a ref to scenes so we can access them inside the poll callback without stale closure
   const scenesRef = useRef(scenes);
   useEffect(() => { scenesRef.current = scenes; }, [scenes]);
 
@@ -367,7 +374,6 @@ function VideoGenerationTab() {
   const timerRef     = useRef<ReturnType<typeof setInterval> | null>(null);
   const startTimeRef = useRef<number>(job.startedAt ?? 0);
   const pollRef      = useRef<ReturnType<typeof setInterval> | null>(null);
-  // Store prompt used at submission time so the library entry is accurate
   const submittedPromptRef = useRef<string>("");
 
   const stopTimer = () => { if (timerRef.current) clearInterval(timerRef.current); };
@@ -414,7 +420,6 @@ function VideoGenerationTab() {
             setJob((j) => ({ ...j, status: "failed", error: "No video URL in response." }));
             return;
           }
-          // Save to library
           const currentScenes = scenesRef.current;
           const firstPrompt = currentScenes[0]?.prompt ?? "Untitled video";
           let savedToLibrary = false;
@@ -438,14 +443,9 @@ function VideoGenerationTab() {
             toast.error("Could not save to library", { description: saveErrMsg, duration: 8000 });
           }
           setJob((j) => ({
-            ...j,
-            status: "completed",
-            progress: 100,
-            progressLabel: "Complete!",
-            finalVideoUrl: videoUrl,
-            chunkUrls: out?.chunk_urls ?? [],
-            savedToLibrary,
-            error: saveErrMsg || null,
+            ...j, status: "completed", progress: 100, progressLabel: "Complete!",
+            finalVideoUrl: videoUrl, chunkUrls: out?.chunk_urls ?? [],
+            savedToLibrary, error: saveErrMsg || null,
           }));
         } else if (data.status === "FAILED") {
           stopPoll(); stopTimer();
@@ -463,13 +463,8 @@ function VideoGenerationTab() {
   const onCancelVideo = async () => {
     if (!job.jobId) return;
     stopPoll(); stopTimer();
-    try {
-      await cancelVideoJob(job.jobId);
-      toast.info("Job cancellation requested");
-    } catch (e) {
-      console.warn("Cancel request error:", e);
-      toast.warning("Cancel request sent (RunPod may still finish the job)");
-    }
+    try { await cancelVideoJob(job.jobId); toast.info("Job cancellation requested"); }
+    catch (e) { console.warn("Cancel error:", e); toast.warning("Cancel request sent"); }
     clearJob(JOB_STORAGE_KEY);
     setJob({ ...INITIAL_VIDEO_JOB, status: "cancelled" });
   };
@@ -491,13 +486,9 @@ function VideoGenerationTab() {
     }
 
     const input = {
-      ...imageInput,
-      fps,
-      frames_per_scene: framesPerScene,
-      num_scenes: scenes.length,
-      sampling_steps: samplingSteps,
-      prompts: scenes.map((s) => s.prompt),
-      negative_prompt: negative,
+      ...imageInput, fps, frames_per_scene: framesPerScene,
+      num_scenes: scenes.length, sampling_steps: samplingSteps,
+      prompts: scenes.map((s) => s.prompt), negative_prompt: negative,
     };
 
     try {
@@ -546,33 +537,26 @@ function VideoGenerationTab() {
               <StopCircle className="h-5 w-5 text-warning" />
               <div className="flex-1">
                 <p className="text-sm font-medium">Job cancelled</p>
-                <p className="mt-0.5 text-xs text-muted-foreground">The request was sent to RunPod. Any already-running worker may still complete shortly.</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">The request was sent to RunPod.</p>
               </div>
               <Button variant="outline" size="sm" onClick={() => setJob(INITIAL_VIDEO_JOB)}>Dismiss</Button>
             </CardContent>
           </Card>
         )}
         {job.status === "completed" && job.finalVideoUrl && (
-          <VideoResultCard
-            url={job.finalVideoUrl}
-            chunkUrls={job.chunkUrls}
-            elapsedSec={job.elapsedSec}
-            savedToLibrary={job.savedToLibrary}
-            saveError={!job.savedToLibrary ? job.error : null}
-            onReset={() => { clearJob(JOB_STORAGE_KEY); setJob(INITIAL_VIDEO_JOB); }}
-          />
+          <VideoResultCard url={job.finalVideoUrl} chunkUrls={job.chunkUrls} elapsedSec={job.elapsedSec}
+            savedToLibrary={job.savedToLibrary} saveError={!job.savedToLibrary ? job.error : null}
+            onReset={() => { clearJob(JOB_STORAGE_KEY); setJob(INITIAL_VIDEO_JOB); }} />
         )}
         {job.status === "failed" && job.error && (
           <ErrorCard message={job.error} onRetry={() => { clearJob(JOB_STORAGE_KEY); setJob(INITIAL_VIDEO_JOB); }} />
         )}
       </div>
       <div className="flex flex-col gap-6 lg:col-span-1">
-        <VideoSummaryPanel
-          refImage={refImage} totalScenes={scenes.length} fps={fps} framesPerScene={framesPerScene}
+        <VideoSummaryPanel refImage={refImage} totalScenes={scenes.length} fps={fps} framesPerScene={framesPerScene}
           samplingSteps={samplingSteps} totalFrames={totalFrames} durationSec={durationSec}
           canGenerate={canGenerate} isRunning={isRunning} job={job}
-          onGenerate={onGenerate} onCancel={onCancelVideo}
-        />
+          onGenerate={onGenerate} onCancel={onCancelVideo} />
       </div>
     </div>
   );
@@ -593,7 +577,6 @@ function ImageGenerationTab() {
     return INITIAL_IMAGE_JOB;
   });
 
-  // Keep prompt ref so poll callback can use the prompt at submission time
   const submittedPromptRef = useRef<string>("");
 
   const setJob = (updater: ImageJobState | ((prev: ImageJobState) => ImageJobState)) => {
@@ -620,33 +603,21 @@ function ImageGenerationTab() {
           stopPoll(); stopTimer();
           const out = data.output;
           console.log("RunPod image output:", out);
-
-          // Exhaustive URL extraction — handles all known Qwen output shapes
           const imgUrl =
-            out?.image_url ||
-            out?.url ||
-            out?.result ||
-            out?.images?.[0]?.image_url ||
-            out?.images?.[0]?.url ||
-            out?.images?.[0]?.image ||
-            out?.[0]?.image_url ||
-            out?.[0]?.url ||
-            out?.[0]?.image ||
-            null;
+            out?.image_url || out?.url || out?.result ||
+            out?.images?.[0]?.image_url || out?.images?.[0]?.url || out?.images?.[0]?.image ||
+            out?.[0]?.image_url || out?.[0]?.url || out?.[0]?.image || null;
 
           if (!imgUrl) {
             setJob((j) => ({ ...j, status: "failed", error: "No image URL in response. Check console for raw output." }));
             return;
           }
 
-          // Save to library
           let savedToLibrary = false;
           let saveErrMsg = "";
           try {
-            await saveImageToLibrary({
-              imageUrl: imgUrl,
-              prompt: submittedPromptRef.current,
-            });
+            // FIX: saveImageToLibrary now uses IMAGE_BUCKET ("images") not VIDEO_BUCKET ("videos")
+            await saveImageToLibrary({ imageUrl: imgUrl, prompt: submittedPromptRef.current });
             savedToLibrary = true;
             toast.success("Image ready & saved to library!", {
               action: { label: "View Library", onClick: () => window.location.href = "/library" },
@@ -659,9 +630,8 @@ function ImageGenerationTab() {
           setJob((j) => ({ ...j, status: "completed", resultUrl: imgUrl, savedToLibrary, error: saveErrMsg || null }));
         } else if (data.status === "FAILED") {
           stopPoll(); stopTimer();
-          const errMsg = data.error ?? "Image generation failed";
-          setJob((j) => ({ ...j, status: "failed", error: errMsg }));
-          toast.error(errMsg);
+          setJob((j) => ({ ...j, status: "failed", error: data.error ?? "Image generation failed" }));
+          toast.error(data.error ?? "Image generation failed");
         } else if (data.status === "CANCELLED") {
           stopPoll(); stopTimer();
           setJob((j) => ({ ...j, status: "cancelled" }));
@@ -686,13 +656,8 @@ function ImageGenerationTab() {
   const onCancelImage = async () => {
     if (!job.jobId) return;
     stopPoll(); stopTimer();
-    try {
-      await cancelImageJob(job.jobId);
-      toast.info("Job cancellation requested");
-    } catch (e) {
-      console.warn("Cancel request error:", e);
-      toast.warning("Cancel request sent (RunPod may still finish the job)");
-    }
+    try { await cancelImageJob(job.jobId); toast.info("Job cancellation requested"); }
+    catch (e) { console.warn("Cancel error:", e); toast.warning("Cancel request sent"); }
     clearJob(IMAGE_JOB_STORAGE_KEY);
     setJob({ ...INITIAL_IMAGE_JOB, status: "cancelled" });
   };
@@ -745,17 +710,13 @@ function ImageGenerationTab() {
   const canGenerate = !!refImage && !!prompt.trim() && !isRunning;
   const m = Math.floor(job.elapsedSec / 60);
   const s = job.elapsedSec % 60;
-
-  const copyUrl = () => {
-    if (job.resultUrl) navigator.clipboard.writeText(job.resultUrl).then(() => toast.success("URL copied"));
-  };
+  const copyUrl = () => { if (job.resultUrl) navigator.clipboard.writeText(job.resultUrl).then(() => toast.success("URL copied")); };
 
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
       <div className="flex flex-col gap-6 lg:col-span-2">
         <ReferenceImageCard image={refImage} setImage={setRefImage} />
 
-        {/* Prompt card */}
         <Card>
           <CardHeader>
             <div className="flex items-start justify-between gap-3">
@@ -774,11 +735,8 @@ function ImageGenerationTab() {
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1.5">
                 <Label className="text-xs font-medium text-muted-foreground">Size</Label>
-                <select
-                  value={size}
-                  onChange={(e) => setSize(e.target.value)}
-                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                >
+                <select value={size} onChange={(e) => setSize(e.target.value)}
+                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
                   {["512*512","768*768","1024*1024","1024*768","768*1024"].map((sz) => (
                     <option key={sz} value={sz}>{sz}</option>
                   ))}
@@ -795,7 +753,6 @@ function ImageGenerationTab() {
           </CardContent>
         </Card>
 
-        {/* Progress */}
         {isRunning && (
           <Card className="border-primary/30 bg-primary/5">
             <CardHeader className="pb-3">
@@ -821,7 +778,6 @@ function ImageGenerationTab() {
           </Card>
         )}
 
-        {/* Cancelled */}
         {job.status === "cancelled" && (
           <Card className="border-warning/30 bg-warning/5">
             <CardContent className="flex items-center gap-3 py-5">
@@ -835,25 +791,17 @@ function ImageGenerationTab() {
           </Card>
         )}
 
-        {/* Result */}
         {job.status === "completed" && job.resultUrl && (
-          <ImageResultCard
-            url={job.resultUrl}
-            elapsedSec={job.elapsedSec}
-            savedToLibrary={job.savedToLibrary}
-            saveError={!job.savedToLibrary ? job.error : null}
-            copyUrl={copyUrl}
-            onReset={() => { clearJob(IMAGE_JOB_STORAGE_KEY); setJob(INITIAL_IMAGE_JOB); }}
-          />
+          <ImageResultCard url={job.resultUrl} elapsedSec={job.elapsedSec}
+            savedToLibrary={job.savedToLibrary} saveError={!job.savedToLibrary ? job.error : null}
+            copyUrl={copyUrl} onReset={() => { clearJob(IMAGE_JOB_STORAGE_KEY); setJob(INITIAL_IMAGE_JOB); }} />
         )}
 
-        {/* Error */}
         {job.status === "failed" && job.error && (
           <ErrorCard message={job.error} onRetry={() => { clearJob(IMAGE_JOB_STORAGE_KEY); setJob(INITIAL_IMAGE_JOB); }} />
         )}
       </div>
 
-      {/* Right summary panel */}
       <div className="lg:col-span-1">
         <Card className="sticky top-24 overflow-hidden">
           <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/60 to-transparent" />
@@ -880,12 +828,8 @@ function ImageGenerationTab() {
               <SummaryRow label="Format" value="JPEG" mono />
               <SummaryRow label="Auto-save" value="Library ✓" />
             </div>
-            <Button
-              size="lg"
-              className="mt-5 w-full gap-2 bg-gradient-to-r from-primary to-chart-4 text-primary-foreground shadow-[0_10px_30px_-10px_var(--primary)] hover:opacity-95"
-              onClick={onGenerate}
-              disabled={!canGenerate}
-            >
+            <Button size="lg" className="mt-5 w-full gap-2 bg-gradient-to-r from-primary to-chart-4 text-primary-foreground shadow-[0_10px_30px_-10px_var(--primary)] hover:opacity-95"
+              onClick={onGenerate} disabled={!canGenerate}>
               {isRunning ? <><Loader2 className="h-4 w-4 animate-spin" /> Generating…</> : <><Wand2 className="h-4 w-4" /> Generate Image</>}
             </Button>
             {isRunning && (
@@ -933,8 +877,7 @@ function ReferenceImageCard({ image, setImage }: { image: { url: string; name: s
             onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
             onDragLeave={() => setDragging(false)}
             onDrop={(e) => { e.preventDefault(); setDragging(false); handleFile(e.dataTransfer.files?.[0]); }}
-            className={`group relative flex h-56 w-full flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed transition-colors ${dragging ? "border-primary bg-primary/5" : "border-border bg-muted/20 hover:bg-muted/30"}`}
-          >
+            className={`group relative flex h-56 w-full flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed transition-colors ${dragging ? "border-primary bg-primary/5" : "border-border bg-muted/20 hover:bg-muted/30"}`}>
             <div className="grid h-12 w-12 place-items-center rounded-full bg-primary/10 text-primary"><Upload className="h-5 w-5" /></div>
             <div className="text-center">
               <p className="text-sm font-medium">Drop image here or click to upload</p>
@@ -1065,9 +1008,7 @@ function JobProgressCard({ job, onCancel }: { job: VideoJobState; onCancel: () =
             <Clock className="h-3.5 w-3.5 text-muted-foreground" />
             <span className="font-mono text-xs text-muted-foreground">{m}m {String(s).padStart(2, "0")}s</span>
             <Badge variant="outline" className="text-xs">{job.status === "queued" ? "Queued" : job.status === "submitting" ? "Submitting" : "Running"}</Badge>
-            <Button size="sm" variant="destructive" className="gap-1.5 h-7 px-2.5" onClick={onCancel}>
-              <StopCircle className="h-3.5 w-3.5" /> Stop
-            </Button>
+            <Button size="sm" variant="destructive" className="gap-1.5 h-7 px-2.5" onClick={onCancel}><StopCircle className="h-3.5 w-3.5" /> Stop</Button>
           </div>
         </div>
       </CardHeader>
@@ -1093,7 +1034,6 @@ function JobProgressCard({ job, onCancel }: { job: VideoJobState; onCancel: () =
   );
 }
 
-// Dedicated video result card — renders a <video> player
 function VideoResultCard({ url, chunkUrls, elapsedSec, savedToLibrary, saveError, onReset }: {
   url: string; chunkUrls: string[]; elapsedSec: number; savedToLibrary: boolean; saveError?: string | null; onReset: () => void;
 }) {
@@ -1105,29 +1045,20 @@ function VideoResultCard({ url, chunkUrls, elapsedSec, savedToLibrary, saveError
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2"><Check className="h-4 w-4 text-success" /><CardTitle className="font-display text-lg">Video Ready</CardTitle></div>
           <div className="flex items-center gap-2">
-            {savedToLibrary && (
-              <Badge variant="outline" className="border-success/40 text-success text-xs gap-1">
-                <Library className="h-3 w-3" /> Saved to Library
-              </Badge>
-            )}
+            {savedToLibrary && <Badge variant="outline" className="border-success/40 text-success text-xs gap-1"><Library className="h-3 w-3" /> Saved to Library</Badge>}
             <Badge variant="outline" className="border-success/40 text-success text-xs">Generated in {m}m {s}s</Badge>
           </div>
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        {/* VIDEO element — correct format for video output */}
         <video src={url} controls playsInline className="w-full rounded-xl border border-border bg-black" />
         <div className="flex flex-wrap gap-2">
-          <Button asChild variant="default" className="gap-2 flex-1">
-            <a href={url} download="lila_generated_video.mp4"><Download className="h-4 w-4" /> Download .mp4</a>
-          </Button>
+          <Button asChild variant="default" className="gap-2 flex-1"><a href={url} download="lila_generated_video.mp4"><Download className="h-4 w-4" /> Download .mp4</a></Button>
           <Button variant="outline" className="gap-2" onClick={copyUrl}><Copy className="h-4 w-4" /> Copy URL</Button>
-          <Button variant="outline" className="gap-2" asChild>
-            <a href={url} target="_blank" rel="noopener noreferrer"><ExternalLink className="h-4 w-4" /> Open</a>
-          </Button>
+          <Button variant="outline" className="gap-2" asChild><a href={url} target="_blank" rel="noopener noreferrer"><ExternalLink className="h-4 w-4" /> Open</a></Button>
         </div>
         {!savedToLibrary && saveError && (
-          <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 space-y-0.5">
+          <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2">
             <p className="text-[11px] font-medium text-destructive">⚠ Could not save to library</p>
             <p className="text-[11px] font-mono text-muted-foreground break-all">{saveError}</p>
           </div>
@@ -1148,16 +1079,13 @@ function VideoResultCard({ url, chunkUrls, elapsedSec, savedToLibrary, saveError
         )}
         <div className="flex gap-2">
           <Button variant="ghost" className="flex-1 text-muted-foreground" onClick={onReset}>Generate another video</Button>
-          <Button variant="outline" size="sm" asChild>
-            <Link to="/library"><Library className="mr-1.5 h-4 w-4" /> View Library</Link>
-          </Button>
+          <Button variant="outline" size="sm" asChild><Link to="/library"><Library className="mr-1.5 h-4 w-4" /> View Library</Link></Button>
         </div>
       </CardContent>
     </Card>
   );
 }
 
-// Dedicated image result card — renders an <img> tag
 function ImageResultCard({ url, elapsedSec, savedToLibrary, saveError, copyUrl, onReset }: {
   url: string; elapsedSec: number; savedToLibrary: boolean; saveError?: string | null; copyUrl: () => void; onReset: () => void;
 }) {
@@ -1168,38 +1096,27 @@ function ImageResultCard({ url, elapsedSec, savedToLibrary, saveError, copyUrl, 
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2"><Check className="h-4 w-4 text-success" /><CardTitle className="font-display text-lg">Image Ready</CardTitle></div>
           <div className="flex items-center gap-2">
-            {savedToLibrary && (
-              <Badge variant="outline" className="border-success/40 text-success text-xs gap-1">
-                <Library className="h-3 w-3" /> Saved to Library
-              </Badge>
-            )}
+            {savedToLibrary && <Badge variant="outline" className="border-success/40 text-success text-xs gap-1"><Library className="h-3 w-3" /> Saved to Library</Badge>}
             <Badge variant="outline" className="border-success/40 text-success text-xs">Done in {m}m {s}s</Badge>
           </div>
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        {/* IMG element — correct format for image output */}
         <img src={url} alt="Generated" className="w-full rounded-xl border border-border object-contain max-h-[600px]" />
         <div className="flex flex-wrap gap-2">
-          <Button asChild variant="default" className="gap-2 flex-1">
-            <a href={url} download="lila_generated_image.jpg"><Download className="h-4 w-4" /> Download .jpg</a>
-          </Button>
+          <Button asChild variant="default" className="gap-2 flex-1"><a href={url} download="lila_generated_image.jpg"><Download className="h-4 w-4" /> Download .jpg</a></Button>
           <Button variant="outline" className="gap-2" onClick={copyUrl}><Copy className="h-4 w-4" /> Copy URL</Button>
-          <Button variant="outline" className="gap-2" asChild>
-            <a href={url} target="_blank" rel="noopener noreferrer"><ExternalLink className="h-4 w-4" /> Open</a>
-          </Button>
+          <Button variant="outline" className="gap-2" asChild><a href={url} target="_blank" rel="noopener noreferrer"><ExternalLink className="h-4 w-4" /> Open</a></Button>
         </div>
         {!savedToLibrary && saveError && (
-          <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 space-y-0.5">
+          <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2">
             <p className="text-[11px] font-medium text-destructive">⚠ Could not save to library</p>
             <p className="text-[11px] font-mono text-muted-foreground break-all">{saveError}</p>
           </div>
         )}
         <div className="flex gap-2">
           <Button variant="ghost" className="flex-1 text-muted-foreground" onClick={onReset}>Generate another image</Button>
-          <Button variant="outline" size="sm" asChild>
-            <Link to="/library"><Library className="mr-1.5 h-4 w-4" /> View Library</Link>
-          </Button>
+          <Button variant="outline" size="sm" asChild><Link to="/library"><Library className="mr-1.5 h-4 w-4" /> View Library</Link></Button>
         </div>
       </CardContent>
     </Card>
@@ -1267,7 +1184,8 @@ function VideoSummaryPanel({ refImage, totalScenes, fps, framesPerScene, samplin
             <Progress value={job.progress} className="h-1.5" />
           </div>
         )}
-        <Button size="lg" className="mt-5 w-full gap-2 bg-gradient-to-r from-primary to-chart-4 text-primary-foreground shadow-[0_10px_30px_-10px_var(--primary)] hover:opacity-95" onClick={onGenerate} disabled={!canGenerate || isRunning}>
+        <Button size="lg" className="mt-5 w-full gap-2 bg-gradient-to-r from-primary to-chart-4 text-primary-foreground shadow-[0_10px_30px_-10px_var(--primary)] hover:opacity-95"
+          onClick={onGenerate} disabled={!canGenerate || isRunning}>
           {isRunning ? <><Loader2 className="h-4 w-4 animate-spin" /> Generating…</> : <><Wand2 className="h-4 w-4" /> Generate Video</>}
         </Button>
         {isRunning && (
