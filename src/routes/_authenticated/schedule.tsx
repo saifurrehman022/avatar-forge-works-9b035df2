@@ -82,7 +82,7 @@ import { cn } from "@/lib/utils";
 // Fanvue OAuth config — hardcoded for testing
 // ---------------------------------------------------------------------------
 const FANVUE_CLIENT_ID     = "f9d35fff-3d12-4dd5-8945-750c37d65ae9";
-const FANVUE_CLIENT_SECRET = "934320423";
+const FANVUE_CLIENT_SECRET = "05275891c81581c5cb79d336c8e9f87680f0976843bf17d6737bdcf0dde38b1a";
 const FANVUE_REDIRECT_URI  = "https://avatar-forge-works-9b035df2-j56ivc6di-saifurrehman022s-projects.vercel.app/schedule";
 const FANVUE_AUTH_URL       = "https://auth.fanvue.com/oauth2/authorize";
 const FANVUE_TOKEN_URL      = "https://auth.fanvue.com/oauth2/token";
