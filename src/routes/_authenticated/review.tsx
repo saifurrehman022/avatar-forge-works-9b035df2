@@ -418,7 +418,7 @@ function ReviewPage() {
             <DashboardCard label="Approved Today" value={stats.approvedToday} icon={CheckCircle2} accent="chart-2" delta={12} hint="vs. yesterday" />
             <DashboardCard label="Rejected Today" value={stats.rejectedToday} icon={XCircle} accent="chart-5" delta={-4} hint="vs. yesterday" />
             <DashboardCard label="Regeneration" value={stats.regen} icon={RotateCcw} accent="chart-3" hint="active requests" />
-            <DashboardCard label="Avg. Review Time" value="2m 14s" icon={Clock} accent="primary" delta={-8} hint="last 24h" />
+            
           </div>
 
           {/* Filter Elements */}
