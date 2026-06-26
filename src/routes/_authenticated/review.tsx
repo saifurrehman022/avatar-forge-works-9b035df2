@@ -17,6 +17,7 @@ import {
   Sparkles,
   Filter,
   Inbox,
+  Film,
 } from "lucide-react";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
@@ -69,8 +70,7 @@ export const Route = createFileRoute("/_authenticated/review")({
       { title: "Review Queue — Lila Studio" },
       {
         name: "description",
-        content:
-          "Moderate, approve and reject AI-generated content before scheduling and publishing.",
+        content: "Moderate, approve and reject AI-generated content before scheduling and publishing.",
       },
     ],
   }),
@@ -78,16 +78,9 @@ export const Route = createFileRoute("/_authenticated/review")({
   errorComponent: RouteErrorBoundary,
 });
 
-
 // ---------- Types ----------
 
-type ReviewStatus =
-  | "pending"
-  | "approved"
-  | "rejected"
-  | "scheduled"
-  | "published";
-
+type ReviewStatus = "pending" | "approved" | "rejected" | "scheduled" | "published";
 type ContentType = "image" | "video";
 
 type HistoryEvent = {
@@ -120,12 +113,7 @@ type ReviewItem = {
 };
 
 const EMPTY_REVIEW_ITEMS: ReviewItem[] = [];
-
-// ---------- Data loading ----------
-
-const NEG_DEFAULT =
-  "low quality, blurry, extra limbs, distorted face, watermark, text, deformed hands";
-
+const NEG_DEFAULT = "low quality, blurry, extra limbs, distorted face, watermark, text, deformed hands";
 const PLACEHOLDER_IMG = "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=800&q=80";
 
 type DbReviewRow = {
@@ -138,6 +126,8 @@ type DbReviewRow = {
   notes: string | null;
   created_at: string;
 };
+
+// ---------- Data Loading ----------
 
 async function fetchQueue(): Promise<ReviewItem[]> {
   const { data: rows, error } = await supabase
@@ -170,9 +160,14 @@ async function fetchQueue(): Promise<ReviewItem[]> {
     const isVideo = r.content_type === "video";
     const src: any = isVideo ? vidMap.get(r.content_id) : imgMap.get(r.content_id);
     const char: any = src?.character_id ? charMap.get(src.character_id) : null;
-    const scenes: string[] = isVideo && Array.isArray(src?.scene_prompts) ? src.scene_prompts : src?.prompt ? [src.prompt] : [];
+    
+    const scenes: string[] = isVideo && Array.isArray(src?.scene_prompts) 
+      ? (src.scene_prompts as unknown[]).map(String) 
+      : src?.prompt ? [src.prompt] : [];
+
     const media = isVideo ? src?.video_url : src?.image_url;
     const thumb = isVideo ? char?.reference_image_url || PLACEHOLDER_IMG : media || PLACEHOLDER_IMG;
+    
     return {
       id: r.id,
       type: r.content_type,
@@ -244,7 +239,7 @@ function timeAgo(iso: string) {
   return `${Math.round(diff / 86400)}d ago`;
 }
 
-// ---------- Page ----------
+// ---------- Page Component ----------
 
 function ReviewPage() {
   const queryClient = useQueryClient();
@@ -253,6 +248,7 @@ function ReviewPage() {
     queryFn: fetchQueue,
     staleTime: 10_000,
   });
+
   const [items, setItems] = useState<ReviewItem[]>([]);
   useEffect(() => setItems(queueItems), [queueItems]);
 
@@ -297,21 +293,17 @@ function ReviewPage() {
     const approvedToday = items.filter(
       (i) =>
         i.status === "approved" &&
-        Date.now() - new Date(i.history.at(-1)?.at ?? i.createdAt).getTime() <
-          24 * 3600 * 1000,
+        Date.now() - new Date(i.history.at(-1)?.at ?? i.createdAt).getTime() < 24 * 3600 * 1000,
     ).length;
     const rejectedToday = items.filter((i) => i.status === "rejected").length;
-    const regen = items.filter((i) =>
-      i.history.some((h) => h.kind === "regenerated"),
-    ).length;
+    const idList = items.map((i) => i.id);
+    const regen = items.filter((i) => i.history.some((h) => h.kind === "regenerated")).length;
     return { pending, approvedToday, rejectedToday, regen };
   }, [items]);
 
   const setStatus = (id: string, status: ReviewStatus, evt: HistoryEvent) =>
     setItems((arr) =>
-      arr.map((i) =>
-        i.id === id ? { ...i, status, history: [...i.history, evt] } : i,
-      ),
+      arr.map((i) => (i.id === id ? { ...i, status, history: [...i.history, evt] } : i)),
     );
 
   const approve = async (id: string) => {
@@ -322,6 +314,7 @@ function ReviewPage() {
       queryClient.invalidateQueries({ queryKey: ["review-queue"] });
     } catch (e: any) { toast.error(e?.message ?? "Failed to approve"); }
   };
+
   const reject = async (id: string) => {
     setStatus(id, "rejected", { at: new Date().toISOString(), label: "Rejected", kind: "rejected" });
     try {
@@ -330,13 +323,21 @@ function ReviewPage() {
       queryClient.invalidateQueries({ queryKey: ["review-queue"] });
     } catch (e: any) { toast.error(e?.message ?? "Failed to reject"); }
   };
+
   const regenerate = async (id: string) => {
     const item = items.find((i) => i.id === id);
     if (!item) return;
     setItems((arr) =>
       arr.map((i) =>
         i.id === id
-          ? { ...i, status: "pending", history: [...i.history, { at: new Date().toISOString(), label: "Regeneration requested", kind: "regenerated" }] }
+          ? {
+              ...i,
+              status: "pending",
+              history: [
+                ...i.history,
+                { at: new Date().toISOString(), label: "Regeneration requested", kind: "regenerated" },
+              ],
+            }
           : i,
       ),
     );
@@ -346,7 +347,13 @@ function ReviewPage() {
         type: item.type,
         status: "queued",
         created_by: userRes.user?.id ?? null,
-        input_payload: { scenes: item.scenes, fps: item.settings.fps, framesPerScene: item.settings.framesPerScene, samplingSteps: item.settings.samplingSteps, regenerationOf: id },
+        input_payload: {
+          scenes: item.scenes,
+          fps: item.settings.fps,
+          framesPerScene: item.settings.framesPerScene,
+          samplingSteps: item.settings.samplingSteps,
+          regenerationOf: id,
+        },
       } as any);
       toast("Regeneration queued");
     } catch (e: any) { toast.error(e?.message ?? "Failed to regenerate"); }
@@ -362,9 +369,7 @@ function ReviewPage() {
   };
 
   const toggleSelect = (id: string) =>
-    setSelected((s) =>
-      s.includes(id) ? s.filter((x) => x !== id) : [...s, id],
-    );
+    setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
 
   const bulkApprove = () => {
     selected.forEach((id) => approve(id));
@@ -393,12 +398,9 @@ function ReviewPage() {
             </div>
             <div className="flex flex-wrap items-end justify-between gap-4">
               <div>
-                <h1 className="font-display text-3xl font-semibold tracking-tight">
-                  Review Queue
-                </h1>
+                <h1 className="font-display text-3xl font-semibold tracking-tight">Review Queue</h1>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  Approve, reject or regenerate AI-generated content before it
-                  reaches scheduling.
+                  Approve, reject or regenerate AI-generated content before it reaches scheduling.
                 </p>
               </div>
               <Button asChild variant="outline" size="sm">
@@ -410,49 +412,16 @@ function ReviewPage() {
             </div>
           </div>
 
-          {/* Stats */}
+          {/* Stats Bar */}
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
-            <DashboardCard
-              label="Pending Review"
-              value={stats.pending}
-              icon={ClipboardCheck}
-              accent="chart-4"
-              hint="awaiting moderator"
-            />
-            <DashboardCard
-              label="Approved Today"
-              value={stats.approvedToday}
-              icon={CheckCircle2}
-              accent="chart-2"
-              delta={12}
-              hint="vs. yesterday"
-            />
-            <DashboardCard
-              label="Rejected Today"
-              value={stats.rejectedToday}
-              icon={XCircle}
-              accent="chart-5"
-              delta={-4}
-              hint="vs. yesterday"
-            />
-            <DashboardCard
-              label="Regeneration"
-              value={stats.regen}
-              icon={RotateCcw}
-              accent="chart-3"
-              hint="active requests"
-            />
-            <DashboardCard
-              label="Avg. Review Time"
-              value="2m 14s"
-              icon={Clock}
-              accent="primary"
-              delta={-8}
-              hint="last 24h"
-            />
+            <DashboardCard label="Pending Review" value={stats.pending} icon={ClipboardCheck} accent="chart-4" hint="awaiting moderator" />
+            <DashboardCard label="Approved Today" value={stats.approvedToday} icon={CheckCircle2} accent="chart-2" delta={12} hint="vs. yesterday" />
+            <DashboardCard label="Rejected Today" value={stats.rejectedToday} icon={XCircle} accent="chart-5" delta={-4} hint="vs. yesterday" />
+            <DashboardCard label="Regeneration" value={stats.regen} icon={RotateCcw} accent="chart-3" hint="active requests" />
+            <DashboardCard label="Avg. Review Time" value="2m 14s" icon={Clock} accent="primary" delta={-8} hint="last 24h" />
           </div>
 
-          {/* Filters */}
+          {/* Filter Elements */}
           <Card className="border-border/60 bg-card/60">
             <CardContent className="flex flex-col gap-3 p-4 lg:flex-row lg:items-center">
               <div className="relative flex-1">
@@ -465,10 +434,7 @@ function ReviewPage() {
                 />
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                <Select
-                  value={statusFilter}
-                  onValueChange={(v) => setStatusFilter(v as ReviewStatus | "all")}
-                >
+                <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v as ReviewStatus | "all")}>
                   <SelectTrigger className="w-[150px]">
                     <Filter className="mr-1 h-3.5 w-3.5" />
                     <SelectValue />
@@ -482,10 +448,7 @@ function ReviewPage() {
                     <SelectItem value="published">Published</SelectItem>
                   </SelectContent>
                 </Select>
-                <Select
-                  value={typeFilter}
-                  onValueChange={(v) => setTypeFilter(v as ContentType | "all")}
-                >
+                <Select value={typeFilter} onValueChange={(v) => setTypeFilter(v as ContentType | "all")}>
                   <SelectTrigger className="w-[130px]">
                     <SelectValue />
                   </SelectTrigger>
@@ -502,9 +465,7 @@ function ReviewPage() {
                   <SelectContent>
                     <SelectItem value="all">All characters</SelectItem>
                     {CHARS.map((c) => (
-                      <SelectItem key={c} value={c}>
-                        {c}
-                      </SelectItem>
+                      <SelectItem key={c} value={c}>{c}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
@@ -512,13 +473,11 @@ function ReviewPage() {
             </CardContent>
           </Card>
 
-          {/* Bulk bar */}
+          {/* Bulk Selection Bar */}
           {selected.length > 0 && (
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-primary/30 bg-primary/5 px-4 py-2.5">
               <p className="text-sm">
-                <span className="font-medium text-foreground">
-                  {selected.length} selected
-                </span>
+                <span className="font-medium text-foreground">{selected.length} selected</span>
                 <span className="text-muted-foreground"> — apply a bulk action</span>
               </p>
               <div className="flex flex-wrap gap-2">
@@ -538,7 +497,7 @@ function ReviewPage() {
             </div>
           )}
 
-          {/* Queue */}
+          {/* Data Cards Render */}
           {filtered.length === 0 ? (
             <EmptyState />
           ) : (
@@ -562,12 +521,9 @@ function ReviewPage() {
           )}
         </main>
 
-        {/* Detail sheet */}
+        {/* Side Panel Sheet */}
         <Sheet open={!!openItem} onOpenChange={(o) => !o && setOpenId(null)}>
-          <SheetContent
-            side="right"
-            className="w-full overflow-y-auto p-0 sm:max-w-2xl"
-          >
+          <SheetContent side="right" className="w-full overflow-y-auto p-0 sm:max-w-2xl">
             {openItem && (
               <DetailPanel
                 item={openItem}
@@ -586,7 +542,7 @@ function ReviewPage() {
   );
 }
 
-// ---------- Queue card ----------
+// ---------- Queue Card Components ----------
 
 function QueueCard({
   item,
@@ -606,36 +562,36 @@ function QueueCard({
   onRegenerate: () => void;
 }) {
   return (
-    <Card
-      className={cn(
-        "group relative overflow-hidden border-border/60 bg-card transition-all hover:border-primary/40",
-        selected && "border-primary ring-1 ring-primary/40",
-      )}
-    >
+    <Card className={cn("group relative overflow-hidden border-border/60 bg-card transition-all hover:border-primary/40", selected && "border-primary ring-1 ring-primary/40")}>
       <div className="relative aspect-[4/5] cursor-pointer overflow-hidden" onClick={onOpen}>
-        <img
-          src={item.thumbnail}
-          alt={item.character}
-          className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
-        />
+        {item.type === "video" ? (
+          <video
+            src={item.preview}
+            className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
+            muted
+            playsInline
+            preload="metadata"
+            onMouseEnter={(e) => e.currentTarget.play().catch(() => {})}
+            onMouseLeave={(e) => { e.currentTarget.pause(); e.currentTarget.currentTime = 0; }}
+          />
+        ) : (
+          <img
+            src={item.thumbnail}
+            alt={item.character}
+            className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
+            loading="lazy"
+          />
+        )}
         <div className="absolute inset-0 bg-gradient-to-t from-background via-background/20 to-transparent" />
 
-        {/* Top row */}
+        {/* Top Indicators Context */}
         <div className="absolute inset-x-0 top-0 flex items-start justify-between p-3">
           <div onClick={(e) => e.stopPropagation()}>
-            <Checkbox
-              checked={selected}
-              onCheckedChange={onToggle}
-              className="border-white/40 bg-background/60 backdrop-blur"
-            />
+            <Checkbox checked={selected} onCheckedChange={onToggle} className="border-white/40 bg-background/60 backdrop-blur" />
           </div>
           <div className="flex flex-col items-end gap-1.5">
             <span className="inline-flex items-center gap-1 rounded-md bg-background/70 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-foreground backdrop-blur">
-              {item.type === "video" ? (
-                <VideoIcon className="h-3 w-3" />
-              ) : (
-                <ImageIcon className="h-3 w-3" />
-              )}
+              {item.type === "video" ? <Film className="h-3 w-3" /> : <ImageIcon className="h-3 w-3" />}
               {item.type}
             </span>
             <StatusBadge status={item.status} />
@@ -643,56 +599,35 @@ function QueueCard({
         </div>
 
         {item.type === "video" && (
-          <div className="absolute inset-0 grid place-items-center opacity-0 transition-opacity group-hover:opacity-100">
+          <div className="absolute inset-0 grid place-items-center opacity-0 transition-opacity group-hover:opacity-100 pointer-events-none">
             <div className="grid h-12 w-12 place-items-center rounded-full bg-background/80 backdrop-blur">
-              <Play className="h-5 w-5 translate-x-[1px] text-foreground" />
+              <Play className="h-5 w-5 translate-x-[1px] text-foreground" fill="currentColor" />
             </div>
           </div>
         )}
 
-        {/* Bottom meta */}
         <div className="absolute inset-x-0 bottom-0 p-3">
           <p className="font-medium text-foreground">{item.character}</p>
-          <p className="text-xs text-muted-foreground">
-            {timeAgo(item.createdAt)} · {item.jobId}
-          </p>
+          <p className="text-xs text-muted-foreground">{timeAgo(item.createdAt)} · {item.jobId.slice(0, 8)}</p>
         </div>
       </div>
 
-      <CardContent className="flex items-center gap-2 p-3">
-        <Button
-          size="sm"
-          variant="outline"
-          className="flex-1"
-          onClick={onReject}
-          disabled={item.status === "rejected"}
-        >
-          <XCircle className="mr-1 h-3.5 w-3.5" />
-          Reject
+      <CardContent className="flex items-center gap-2 p-3 bg-card relative z-10">
+        <Button size="sm" variant="outline" className="flex-1" onClick={onReject} disabled={item.status === "rejected"}>
+          <XCircle className="mr-1 h-3.5 w-3.5" /> Reject
         </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={onRegenerate}
-          title="Regenerate"
-        >
+        <Button size="sm" variant="outline" onClick={onRegenerate} title="Regenerate">
           <RotateCcw className="h-3.5 w-3.5" />
         </Button>
-        <Button
-          size="sm"
-          className="flex-1"
-          onClick={onApprove}
-          disabled={item.status === "approved"}
-        >
-          <CheckCircle2 className="mr-1 h-3.5 w-3.5" />
-          Approve
+        <Button size="sm" className="flex-1" onClick={onApprove} disabled={item.status === "approved"}>
+          <CheckCircle2 className="mr-1 h-3.5 w-3.5" /> Approve
         </Button>
       </CardContent>
     </Card>
   );
 }
 
-// ---------- Detail panel ----------
+// ---------- Detail Panel Side Element ----------
 
 function DetailPanel({
   item,
@@ -716,11 +651,9 @@ function DetailPanel({
       <SheetHeader className="border-b border-border/60 px-6 py-4">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <SheetTitle className="font-display text-xl">
-              {item.character}
-            </SheetTitle>
+            <SheetTitle className="font-display text-xl">{item.character}</SheetTitle>
             <SheetDescription>
-              {item.type === "video" ? "Video" : "Image"} · {item.jobId}
+              {item.type === "video" ? "Video Asset" : "Image Asset"} · <span className="font-mono text-xs">{item.jobId}</span>
             </SheetDescription>
           </div>
           <StatusBadge status={item.status} />
@@ -729,77 +662,56 @@ function DetailPanel({
 
       <ScrollArea className="flex-1">
         <div className="space-y-6 px-6 py-6">
-          {/* Preview */}
+          {/* Media Interactive Framework Preview */}
           <div className="relative overflow-hidden rounded-xl border border-border/60 bg-muted">
-            <img
-              src={item.preview}
-              alt={item.character}
-              className={cn(
-                "w-full object-cover",
-                item.type === "video" ? "aspect-video" : "aspect-[4/5]",
-              )}
-            />
-            {item.type === "video" && (
-              <div className="absolute inset-0 grid place-items-center">
-                <div className="grid h-14 w-14 place-items-center rounded-full bg-background/80 backdrop-blur">
-                  <Play className="h-6 w-6 translate-x-[1px]" />
-                </div>
-              </div>
+            {item.type === "video" ? (
+              <video src={item.preview} controls className="w-full object-cover aspect-video" playsInline />
+            ) : (
+              <img src={item.preview} alt={item.character} className="w-full object-cover aspect-[4/5]" />
             )}
           </div>
 
-          {/* Actions */}
+          {/* Decision Grid */}
           <div className="grid grid-cols-3 gap-2">
-            <Button variant="outline" onClick={onReject}>
-              <XCircle className="mr-1.5 h-4 w-4" />
-              Reject
+            <Button variant="outline" onClick={onReject} disabled={item.status === "rejected"}>
+              <XCircle className="mr-1.5 h-4 w-4" /> Reject
             </Button>
             <Button variant="outline" onClick={onRegenerate}>
-              <RotateCcw className="mr-1.5 h-4 w-4" />
-              Regenerate
+              <RotateCcw className="mr-1.5 h-4 w-4" /> Regenerate
             </Button>
-            <Button onClick={onApprove}>
-              <CheckCircle2 className="mr-1.5 h-4 w-4" />
-              Approve
+            <Button onClick={onApprove} disabled={item.status === "approved"}>
+              <CheckCircle2 className="mr-1.5 h-4 w-4" /> Approve
             </Button>
           </div>
 
           <Separator />
 
-          {/* Generation details */}
+          {/* Specs Context Mapping */}
           <section className="space-y-3">
             <h3 className="flex items-center gap-2 text-sm font-semibold">
-              <Sparkles className="h-4 w-4 text-primary" />
-              Generation details
+              <Sparkles className="h-4 w-4 text-primary" /> Generation details
             </h3>
             <div className="flex gap-4">
-              <img
-                src={item.referenceImage}
-                alt="reference"
-                className="h-28 w-24 rounded-lg border border-border/60 object-cover"
-              />
+              <img src={item.referenceImage} alt="reference metadata link" className="h-28 w-24 rounded-lg border border-border/60 object-cover" />
               <div className="grid flex-1 grid-cols-2 gap-2 text-xs">
                 <Stat label="FPS" value={item.settings.fps || "—"} />
                 <Stat label="Frames / scene" value={item.settings.framesPerScene || "—"} />
-                <Stat label="Scenes" value={item.settings.numScenes} />
+                <Stat label="Scenes Count" value={item.settings.numScenes} />
                 <Stat label="Sampling steps" value={item.settings.samplingSteps} />
               </div>
             </div>
             <div className="grid grid-cols-2 gap-2 text-xs">
-              <Stat label="Generated" value={new Date(item.createdAt).toLocaleString()} />
-              <Stat label="Job ID" value={item.jobId} mono />
+              <Stat label="Generated Timestamp" value={new Date(item.createdAt).toLocaleString()} />
+              <Stat label="Target Job ID" value={item.jobId} mono />
             </div>
           </section>
 
-          {/* Scene prompts */}
+          {/* Dynamic Map Array Prompt Engine */}
           <section className="space-y-2">
             <h3 className="text-sm font-semibold">Scene prompts</h3>
             <div className="space-y-2">
               {item.scenes.map((s, i) => (
-                <div
-                  key={i}
-                  className="rounded-lg border border-border/60 bg-muted/40 p-2.5 text-xs"
-                >
+                <div key={i} className="rounded-lg border border-border/60 bg-muted/40 p-2.5 text-xs">
                   <span className="mr-2 inline-flex h-4 w-4 items-center justify-center rounded bg-primary/20 text-[10px] font-medium text-primary">
                     {i + 1}
                   </span>
@@ -809,7 +721,7 @@ function DetailPanel({
             </div>
           </section>
 
-          {/* Negative */}
+          {/* Static Constraints Block */}
           <section className="space-y-2">
             <h3 className="text-sm font-semibold">Negative prompt</h3>
             <p className="rounded-lg border border-border/60 bg-muted/40 p-2.5 text-xs text-muted-foreground">
@@ -817,28 +729,25 @@ function DetailPanel({
             </p>
           </section>
 
-          {/* Notes */}
+          {/* Moderator Notes Panel */}
           <section className="space-y-2">
             <h3 className="flex items-center gap-2 text-sm font-semibold">
-              <FileText className="h-4 w-4" />
-              Reviewer notes
+              <FileText className="h-4 w-4" /> Reviewer notes
             </h3>
             <Textarea
               value={noteDraft}
               onChange={(e) => onNoteChange(e.target.value)}
-              placeholder="e.g. Improve lighting, better facial consistency, scene 4 needs adjustment"
+              placeholder="e.g. Improve lighting conditions, facial layout sync problems, re-render scene 3..."
               rows={3}
             />
             <div className="flex justify-end">
-              <Button size="sm" variant="outline" onClick={onSaveNote}>
-                Save note
-              </Button>
+              <Button size="sm" variant="outline" onClick={onSaveNote}>Save note</Button>
             </div>
           </section>
 
-          {/* History */}
+          {/* Workflow Sequence Log Tracker */}
           <section className="space-y-3">
-            <h3 className="text-sm font-semibold">Review history</h3>
+            <h3 className="text-sm font-semibold">Review history tracking</h3>
             <ol className="space-y-3">
               {item.history.map((h, i) => (
                 <li key={i} className="flex gap-3">
@@ -851,19 +760,14 @@ function DetailPanel({
                         h.kind === "regenerated" && "bg-chart-3",
                         h.kind === "scheduled" && "bg-primary",
                         h.kind === "published" && "bg-chart-2",
-                        (h.kind === "generated" || h.kind === "queued") &&
-                          "bg-muted-foreground",
+                        (h.kind === "generated" || h.kind === "queued") && "bg-muted-foreground",
                       )}
                     />
-                    {i < item.history.length - 1 && (
-                      <span className="mt-1 h-full w-px flex-1 bg-border" />
-                    )}
+                    {i < item.history.length - 1 && <span className="mt-1 h-full w-px flex-1 bg-border" />}
                   </div>
                   <div className="pb-3">
                     <p className="text-sm text-foreground">{h.label}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {new Date(h.at).toLocaleString()}
-                    </p>
+                    <p className="text-xs text-muted-foreground">{new Date(h.at).toLocaleString()}</p>
                   </div>
                 </li>
               ))}
@@ -875,28 +779,16 @@ function DetailPanel({
   );
 }
 
-function Stat({
-  label,
-  value,
-  mono,
-}: {
-  label: string;
-  value: string | number;
-  mono?: boolean;
-}) {
+function Stat({ label, value, mono }: { label: string; value: string | number; mono?: boolean }) {
   return (
     <div className="rounded-lg border border-border/60 bg-muted/40 p-2.5">
-      <p className="text-[10px] uppercase tracking-wider text-muted-foreground">
-        {label}
-      </p>
-      <p className={cn("mt-0.5 text-foreground", mono && "font-mono text-xs")}>
-        {value}
-      </p>
+      <p className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</p>
+      <p className={cn("mt-0.5 text-foreground", mono && "font-mono text-xs")}>{value}</p>
     </div>
   );
 }
 
-// ---------- Empty ----------
+// ---------- Empty State Fallback ----------
 
 function EmptyState() {
   return (
@@ -905,12 +797,9 @@ function EmptyState() {
         <div className="mx-auto grid h-12 w-12 place-items-center rounded-full bg-muted">
           <Inbox className="h-5 w-5 text-muted-foreground" />
         </div>
-        <h3 className="font-display text-lg font-semibold">
-          Nothing is waiting for review
-        </h3>
+        <h3 className="font-display text-lg font-semibold">Nothing is waiting for review</h3>
         <p className="text-sm text-muted-foreground">
-          New AI-generated content will land here for moderation as soon as
-          generation jobs complete.
+          New AI-generated content items will land here for moderation parameters as soon as async pipeline generation jobs complete.
         </p>
         <Button asChild variant="outline" size="sm">
           <Link to="/library">View Content Library</Link>
