@@ -1,3 +1,4 @@
+
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -82,11 +83,21 @@ import { cn } from "@/lib/utils";
 // Fanvue OAuth config
 // ---------------------------------------------------------------------------
 const FANVUE_CLIENT_ID     = "f9d35fff-3d12-4dd5-8945-750c37d65ae9";
-const FANVUE_CLIENT_SECRET = "03481-2"; // Updated to actual secret
+const FANVUE_CLIENT_SECRET = "05275891c81581c5cb79d336c8e9f87680f0976843bf17d6737bdcf0dde38b1a";
 const FANVUE_REDIRECT_URI  = "https://avatar-forge-works-9b035df2-j56ivc6di-saifurrehman022s-projects.vercel.app/schedule";
-const FANVUE_AUTH_URL       = "https://auth.fanvue.com/oauth2/auth"; // Correct endpoint
-const FANVUE_TOKEN_URL      = "https://auth.fanvue.com/oauth2/token";
-const FANVUE_API_BASE        = "https://api.fanvue.com";
+const FANVUE_AUTH_URL      = "https://auth.fanvue.com/oauth2/auth";
+const FANVUE_TOKEN_URL     = "https://auth.fanvue.com/oauth2/token";
+const FANVUE_API_BASE      = "https://api.fanvue.com";
+
+// Required API version header — mandatory on every request per Fanvue docs
+const FANVUE_API_VERSION = "2025-06-26";
+
+// Fanvue API version header helper
+const fanvueHeaders = (accessToken: string, extra?: Record<string, string>) => ({
+  Authorization: `Bearer ${accessToken}`,
+  "X-Fanvue-API-Version": FANVUE_API_VERSION,
+  ...extra,
+});
 
 // ---------------------------------------------------------------------------
 // Fanvue OAuth helpers
@@ -98,7 +109,8 @@ function startFanvueOAuth() {
     client_id: FANVUE_CLIENT_ID,
     redirect_uri: FANVUE_REDIRECT_URI,
     response_type: "code",
-    scope: "openid profile posts:write",
+    // write:media required for multipart upload; write:post required for post creation
+    scope: "openid profile read:self write:post write:media",
     state: crypto.randomUUID(),
   });
   window.location.href = `${FANVUE_AUTH_URL}?${params.toString()}`;
@@ -130,12 +142,13 @@ async function exchangeFanvueCode(code: string): Promise<void> {
   const refreshToken = tokens.refresh_token as string | undefined;
   const expiresIn    = tokens.expires_in as number | undefined;
 
-  const profileRes = await fetch(`${FANVUE_API_BASE}/v1/me`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
+  // GET /me requires X-Fanvue-API-Version header too
+  const profileRes = await fetch(`${FANVUE_API_BASE}/me`, {
+    headers: fanvueHeaders(accessToken),
   });
   const profile = profileRes.ok ? await profileRes.json() : {};
-  const handle   = profile.username ?? profile.handle ?? profile.id ?? "fanvue-user";
-  const name     = profile.displayName ?? profile.name ?? handle;
+  const handle  = profile.username ?? profile.handle ?? profile.uuid ?? "fanvue-user";
+  const name    = profile.displayName ?? profile.name ?? handle;
 
   const { data: userRes } = await supabase.auth.getUser();
 
@@ -157,62 +170,180 @@ async function exchangeFanvueCode(code: string): Promise<void> {
   if (error) throw new Error(`Failed to save account: ${error.message}`);
 }
 
-/** Post content to Fanvue using stored access token and explicit media file conversions */
+// ---------------------------------------------------------------------------
+// Fanvue real upload flow (3 steps per official API docs)
+// ---------------------------------------------------------------------------
+/**
+ * Step 1: Create a multipart upload session.
+ * POST /media/uploads
+ * Returns { mediaUuid, uploadId }
+ */
+async function createFanvueUploadSession(params: {
+  accessToken: string;
+  filename: string;
+  mediaType: "image" | "video";
+}): Promise<{ mediaUuid: string; uploadId: string }> {
+  const res = await fetch(`${FANVUE_API_BASE}/media/uploads`, {
+    method: "POST",
+    headers: fanvueHeaders(params.accessToken, { "Content-Type": "application/json" }),
+    body: JSON.stringify({
+      name: params.filename,
+      filename: params.filename,
+      mediaType: params.mediaType, // "image" | "video" | "audio" | "document"
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Fanvue upload session creation failed (${res.status}): ${err}`);
+  }
+
+  const data = await res.json();
+  if (!data.mediaUuid || !data.uploadId) {
+    throw new Error(`Unexpected session response: ${JSON.stringify(data)}`);
+  }
+  return { mediaUuid: data.mediaUuid, uploadId: data.uploadId };
+}
+
+/**
+ * Step 2a: Get a presigned S3 URL for a specific upload part.
+ * GET /media/uploads/{uploadId}/parts/{partNumber}/url
+ * Returns a plain-text presigned URL string.
+ */
+async function getFanvuePartUrl(params: {
+  accessToken: string;
+  uploadId: string;
+  partNumber: number;
+}): Promise<string> {
+  const res = await fetch(
+    `${FANVUE_API_BASE}/media/uploads/${params.uploadId}/parts/${params.partNumber}/url`,
+    { headers: fanvueHeaders(params.accessToken) }
+  );
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Failed to get presigned URL for part ${params.partNumber} (${res.status}): ${err}`);
+  }
+
+  // Response is text/plain — a raw presigned S3 URL
+  return res.text();
+}
+
+/**
+ * Step 2b: Upload a single part directly to S3 using the presigned URL.
+ * PUT <presigned-url> with raw binary body.
+ * Returns the ETag from S3 response headers.
+ */
+async function uploadPartToS3(presignedUrl: string, chunk: Blob): Promise<string> {
+  const res = await fetch(presignedUrl, {
+    method: "PUT",
+    body: chunk,
+    // No Authorization header — S3 presigned URLs are self-authenticating
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`S3 part upload failed (${res.status}): ${err}`);
+  }
+
+  const etag = res.headers.get("ETag");
+  if (!etag) throw new Error("S3 did not return an ETag for the uploaded part");
+  return etag;
+}
+
+/**
+ * Step 3: Complete the multipart upload session.
+ * PATCH /media/uploads/{uploadId}
+ * Body: { parts: [{ PartNumber, ETag }] }
+ */
+async function completeFanvueUpload(params: {
+  accessToken: string;
+  uploadId: string;
+  parts: Array<{ PartNumber: number; ETag: string }>;
+}): Promise<void> {
+  const res = await fetch(`${FANVUE_API_BASE}/media/uploads/${params.uploadId}`, {
+    method: "PATCH",
+    headers: fanvueHeaders(params.accessToken, { "Content-Type": "application/json" }),
+    body: JSON.stringify({ parts: params.parts }),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Fanvue upload completion failed (${res.status}): ${err}`);
+  }
+  // Response: { status: "processing" | "ready" | ... } — media processes asynchronously
+}
+
+/**
+ * Full publish flow:
+ * 1. Fetch binary from mediaUrl
+ * 2. Create upload session → mediaUuid + uploadId
+ * 3. Get presigned S3 URL for part 1, upload blob, collect ETag
+ * 4. Complete upload session
+ * 5. POST /posts with mediaUuids and audience
+ *
+ * Returns the created post UUID.
+ */
 async function publishToFanvue(params: {
   accessToken: string;
   mediaUrl: string;
   mediaType: "image" | "video";
   caption: string;
+  audience?: "subscribers" | "followers-and-subscribers";
 }): Promise<string> {
-  // Step 1 — Fetch the binary content of the generation asset
-  const mediaAssetFile = await fetch(params.mediaUrl);
-  const blobData = await mediaAssetFile.blob();
-  
-  // Construct multi-part upload body object
-  const mediaFormData = new FormData();
-  mediaFormData.append("file", blobData, `upload-${Date.now()}.${params.mediaType === "video" ? "mp4" : "png"}`);
+  // ── Fetch the media binary ─────────────────────────────────────────────────
+  const mediaRes = await fetch(params.mediaUrl);
+  if (!mediaRes.ok) throw new Error(`Failed to fetch media asset (${mediaRes.status})`);
+  const blob = await mediaRes.blob();
 
-  // Push straight into vault storage
-  const uploadRes = await fetch(`${FANVUE_API_BASE}/v1/posts/media`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${params.accessToken}`,
-    },
-    body: mediaFormData,
+  const ext      = params.mediaType === "video" ? "mp4" : "png";
+  const filename = `upload-${Date.now()}.${ext}`;
+
+  // ── Step 1: create upload session ─────────────────────────────────────────
+  const { mediaUuid, uploadId } = await createFanvueUploadSession({
+    accessToken: params.accessToken,
+    filename,
+    mediaType: params.mediaType,
   });
 
-  if (!uploadRes.ok) {
-    const err = await uploadRes.text();
-    throw new Error(`Fanvue media upload failed: ${err}`);
-  }
-  const uploadData = await uploadRes.json();
-  const mediaId = uploadData.id ?? uploadData.mediaId ?? uploadData.uuid;
+  // ── Step 2: upload single part to S3 ──────────────────────────────────────
+  // For small files (< 5 GB) a single part is sufficient.
+  const presignedUrl = await getFanvuePartUrl({
+    accessToken: params.accessToken,
+    uploadId,
+    partNumber: 1,
+  });
 
-  if (!mediaId) {
-    throw new Error("Fanvue processed media but returned an unrecognized structure identifier.");
-  }
+  const etag = await uploadPartToS3(presignedUrl, blob);
 
-  // Step 2 — Bind Vault storage asset key into live timeline target
-  const postRes = await fetch(`${FANVUE_API_BASE}/v1/posts`, {
+  // ── Step 3: complete upload session ───────────────────────────────────────
+  await completeFanvueUpload({
+    accessToken: params.accessToken,
+    uploadId,
+    parts: [{ PartNumber: 1, ETag: etag }],
+  });
+
+  // ── Step 4: create the post ────────────────────────────────────────────────
+  // Note: audience must be "subscribers" or "followers-and-subscribers" (required field)
+  const postRes = await fetch(`${FANVUE_API_BASE}/posts`, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${params.accessToken}`,
-      "Content-Type": "application/json",
-    },
+    headers: fanvueHeaders(params.accessToken, { "Content-Type": "application/json" }),
     body: JSON.stringify({
       text: params.caption,
-      mediaUuids: [mediaId],
-      visibility: "public",
-      status: "published"
+      mediaUuids: [mediaUuid],
+      audience: params.audience ?? "subscribers",
     }),
   });
 
   if (!postRes.ok) {
     const err = await postRes.text();
-    throw new Error(`Fanvue post creation failed: ${err}`);
+    throw new Error(`Fanvue post creation failed (${postRes.status}): ${err}`);
   }
+
   const postData = await postRes.json();
-  return postData.id ?? postData.postId ?? `fv_${Date.now()}`;
+  // POST /posts returns { uuid, createdAt, text, price, audience, publishAt, publishedAt, ... }
+  const postId = postData.uuid ?? postData.id ?? `fv_${Date.now()}`;
+  return postId;
 }
 
 // ---------------------------------------------------------------------------
@@ -699,11 +830,13 @@ function SchedulePage() {
     try {
       const caption = item.scenePrompts[0] ?? item.contentName;
 
+      // Uses the corrected 3-step Fanvue upload flow
       const externalPostId = await publishToFanvue({
         accessToken: account.accessToken,
         mediaUrl: item.mediaUrl,
         mediaType: item.type,
         caption,
+        audience: "subscribers",
       });
 
       const now = new Date().toISOString();
@@ -736,7 +869,7 @@ function SchedulePage() {
       });
 
       toast.success(`Published to Fanvue @${account.handle}!`, {
-        description: `Post ID: ${externalPostId}`,
+        description: `Post UUID: ${externalPostId}`,
       });
       queryClient.invalidateQueries({ queryKey: ["schedules"] });
     } catch (e: any) {
@@ -1146,7 +1279,7 @@ function DetailSheet({ item, onClose, getAccount, onRetry, onPublishNow, onRemov
               {(item.externalPostId || item.publishedAt) && (
                 <div className="grid grid-cols-2 gap-3">
                   {item.publishedAt && <Field label="Published at" value={fmtDateTime(item.publishedAt)} />}
-                  {item.externalPostId && <Field label="Fanvue Post ID" value={item.externalPostId} mono />}
+                  {item.externalPostId && <Field label="Fanvue Post UUID" value={item.externalPostId} mono />}
                 </div>
               )}
               <div>
