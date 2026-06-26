@@ -223,7 +223,6 @@ async function saveVideoToLibrary(params: {
     prompt: params.prompt,
     scene_prompts: params.scenePrompts,
     status: "pending",
-    publish_status: null,
   });
   if (error) throw new Error(`DB insert failed: ${error.message}`);
 }
@@ -236,7 +235,6 @@ async function saveImageToLibrary(params: {
     image_url: params.imageUrl,
     prompt: params.prompt,
     status: "pending",
-    publish_status: null,
   });
   if (error) throw new Error(`DB insert failed: ${error.message}`);
 }
