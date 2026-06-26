@@ -10,6 +10,8 @@ import {
   Clock,
   Search,
   Image as ImageIcon,
+  Video as VideoIcon,
+  Play,
   ArrowLeft,
   Send,
   Filter,
@@ -36,7 +38,7 @@ import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/dashboard/app-sidebar";
 import { AppHeader } from "@/components/dashboard/app-header";
 import { DashboardCard } from "@/components/dashboard/dashboard-card";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -77,19 +79,20 @@ import {
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
-// Fanvue Configuration
+// Fanvue OAuth config — hardcoded for testing
 // ---------------------------------------------------------------------------
 const FANVUE_CLIENT_ID     = "f9d35fff-3d12-4dd5-8945-750c37d65ae9";
-const FANVUE_CLIENT_SECRET = "05275891c81581c5cb79d336c8e9f87680f0976843bf17d6737bdcf0dde38b1a"; 
+const FANVUE_CLIENT_SECRET = "934320423";
 const FANVUE_REDIRECT_URI  = "https://avatar-forge-works-9b035df2-j56ivc6di-saifurrehman022s-projects.vercel.app/schedule";
-const FANVUE_AUTH_URL       = "https://auth.fanvue.com/oauth2/auth"; 
+const FANVUE_AUTH_URL       = "https://auth.fanvue.com/oauth2/authorize";
 const FANVUE_TOKEN_URL      = "https://auth.fanvue.com/oauth2/token";
 const FANVUE_API_BASE        = "https://api.fanvue.com";
 
 // ---------------------------------------------------------------------------
-// Fanvue OAuth Engine
+// Fanvue OAuth helpers
 // ---------------------------------------------------------------------------
 
+/** Redirect browser to Fanvue login page */
 function startFanvueOAuth() {
   const params = new URLSearchParams({
     client_id: FANVUE_CLIENT_ID,
@@ -98,9 +101,10 @@ function startFanvueOAuth() {
     scope: "openid profile posts:write",
     state: crypto.randomUUID(),
   });
-  window.location.href = `${FANVUE_AUTH_URL}?${params.toString()}`;
+  window.location.href = `${FANVUE_AUTH_URL}?${params}`;
 }
 
+/** Exchange OAuth code for tokens and save to connected_accounts */
 async function exchangeFanvueCode(code: string): Promise<void> {
   const body = new URLSearchParams({
     grant_type: "authorization_code",
@@ -126,6 +130,7 @@ async function exchangeFanvueCode(code: string): Promise<void> {
   const refreshToken = tokens.refresh_token as string | undefined;
   const expiresIn    = tokens.expires_in as number | undefined;
 
+  // Fetch Fanvue profile to get username/handle
   const profileRes = await fetch(`${FANVUE_API_BASE}/v1/me`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
@@ -135,6 +140,7 @@ async function exchangeFanvueCode(code: string): Promise<void> {
 
   const { data: userRes } = await supabase.auth.getUser();
 
+  // Upsert into connected_accounts
   const { error } = await supabase.from("connected_accounts").upsert(
     {
       account_name: name,
@@ -153,88 +159,55 @@ async function exchangeFanvueCode(code: string): Promise<void> {
   if (error) throw new Error(`Failed to save account: ${error.message}`);
 }
 
-/** Post an image asset to Fanvue by uploading the raw binary data */
+/** Post content to Fanvue using stored access token */
 async function publishToFanvue(params: {
   accessToken: string;
   mediaUrl: string;
   mediaType: "image" | "video";
   caption: string;
 }): Promise<string> {
-  if (params.mediaType !== "image") {
-    throw new Error("This pipeline is currently configured for image processing only.");
-  }
-
-  console.log("🎬 [Fanvue Image Sync] Starting image upload sequence...");
-  console.log(`- Target Asset URL: ${params.mediaUrl}`);
-
-  // 1. Download the raw file bytes from your Supabase storage URL
-  const response = await fetch(params.mediaUrl);
-  if (!response.ok) {
-    throw new Error(`Failed to download image from storage link. Status: ${response.status}`);
-  }
-  const imageBlob = await response.blob();
-  console.log(`📸 Image downloaded from Supabase. Size: ${imageBlob.size} bytes. Type: ${imageBlob.type}`);
-
-  // 2. Wrap the binary data into standard multipart/form-data
-  const formData = new FormData();
-  formData.append("file", imageBlob, `post-image-${Date.now()}.png`);
-
-  // 3. Upload the actual file data to Fanvue's media vault endpoint
-  console.log("📤 Sending image binary to Fanvue Vault...");
+  // Step 1 — upload media
   const uploadRes = await fetch(`${FANVUE_API_BASE}/v1/posts/media`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${params.accessToken}`,
-      "X-Fanvue-API-Version": "2025-06-26"
+      "Content-Type": "application/json",
     },
-    body: formData,
+    body: JSON.stringify({
+      url: params.mediaUrl,
+      type: params.mediaType,
+    }),
   });
 
   if (!uploadRes.ok) {
-    const errorLog = await uploadRes.text();
-    console.error("❌ Fanvue media vault upload failed:", errorLog);
-    throw new Error(`Fanvue media vault rejected the file payload: ${errorLog}`);
+    const err = await uploadRes.text();
+    throw new Error(`Fanvue media upload failed: ${err}`);
   }
-
   const uploadData = await uploadRes.json();
-  const mediaId = uploadData.id ?? uploadData.mediaId ?? uploadData.uuid;
-  console.log(`✅ Image safely stored in Vault! Asset Identifier: ${mediaId}`);
+  const mediaId = uploadData.id ?? uploadData.mediaId;
 
-  if (!mediaId) {
-    throw new Error("Upload completed, but Fanvue did not return a valid asset media ID token.");
-  }
-
-  // 4. Attach that newly uploaded media ID directly to a public timeline post
-  console.log("📝 Creating the timeline post with your image...");
+  // Step 2 — create post
   const postRes = await fetch(`${FANVUE_API_BASE}/v1/posts`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${params.accessToken}`,
       "Content-Type": "application/json",
-      "X-Fanvue-API-Version": "2025-06-26"
     },
     body: JSON.stringify({
-      text: params.caption,      
-      mediaUuids: [mediaId],     
-      visibility: "public",      
-      status: "published"
+      caption: params.caption,
+      mediaIds: [mediaId],
+      visibility: "subscribers",
     }),
   });
 
   if (!postRes.ok) {
-    const errorLog = await postRes.text();
-    console.error("❌ Timeline post creation failed:", errorLog);
-    throw new Error(`Fanvue post generation failed: ${errorLog}`);
+    const err = await postRes.text();
+    throw new Error(`Fanvue post creation failed: ${err}`);
   }
-
   const postData = await postRes.json();
-  console.log("🎉 Post successfully went live on profile feed!", postData);
-  
   return postData.id ?? postData.postId ?? `fv_${Date.now()}`;
 }
 
-// ---------------------------------------------------------------------------
-// Route Boundaries & Structural Types
 // ---------------------------------------------------------------------------
 
 function RouteErrorBoundary({ error, reset }: { error: Error; reset: () => void }) {
@@ -257,13 +230,15 @@ export const Route = createFileRoute("/_authenticated/schedule")({
       { title: "Scheduling — Lila Studio" },
       {
         name: "description",
-        content: "Schedule, queue and publish approved image assets to connected Fanvue profiles.",
+        content: "Schedule, queue and publish approved content to connected Fanvue accounts.",
       },
     ],
   }),
   component: SchedulePage,
   errorComponent: RouteErrorBoundary,
 });
+
+// ---------- Types ----------
 
 type PublishStatus = "scheduled" | "publishing" | "published" | "failed";
 type QueueStatus = "waiting" | "ready" | "publishing" | "published" | "failed";
@@ -302,7 +277,7 @@ type ScheduledItem = {
   externalPostId?: string;
   publishedAt?: string;
   reviewStatus: "approved";
-  settings: { samplingSteps: number };
+  settings: { fps: number; framesPerScene: number; numScenes: number; samplingSteps: number };
   scenePrompts: string[];
   negativePrompt: string;
   history: HistoryEvent[];
@@ -310,11 +285,10 @@ type ScheduledItem = {
 
 const EMPTY_SCHEDULE_ITEMS: ScheduledItem[] = [];
 const EMPTY_CONNECTED_ACCOUNTS: ConnectedAccount[] = [];
-const PLACEHOLDER = "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=600&q=80";
 
-// ---------------------------------------------------------------------------
-// Supabase Connectors
-// ---------------------------------------------------------------------------
+// ---------- Data loaders ----------
+
+const PLACEHOLDER = "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=600&q=80";
 
 async function fetchAccounts(): Promise<ConnectedAccount[]> {
   const { data, error } = await supabase
@@ -327,7 +301,12 @@ async function fetchAccounts(): Promise<ConnectedAccount[]> {
     platform: "fanvue",
     name: a.account_name,
     handle: a.external_account_id ?? "—",
-    status: a.connection_status === "connected" ? "connected" : a.connection_status === "error" ? "error" : "disconnected",
+    status:
+      a.connection_status === "connected"
+        ? "connected"
+        : a.connection_status === "error"
+          ? "error"
+          : "disconnected",
     accessToken: a.access_token ?? undefined,
   }));
 }
@@ -343,8 +322,12 @@ async function fetchSchedules(): Promise<ScheduledItem[]> {
   const videoIds = (rows ?? []).filter((r: any) => r.content_type === "video").map((r: any) => r.content_id);
 
   const [imgRes, vidRes, charRes] = await Promise.all([
-    imageIds.length ? supabase.from("images").select("id, image_url, prompt, character_id, connected_account_id, published_at, external_post_id, publish_status").in("id", imageIds) : Promise.resolve({ data: [] }),
-    videoIds.length ? supabase.from("videos").select("id, video_url, prompt, scene_prompts, character_id, connected_account_id, published_at, external_post_id, publish_status").in("id", videoIds) : Promise.resolve({ data: [] }),
+    imageIds.length
+      ? supabase.from("images").select("id, image_url, prompt, character_id, connected_account_id, published_at, external_post_id, publish_status").in("id", imageIds)
+      : Promise.resolve({ data: [] } as any),
+    videoIds.length
+      ? supabase.from("videos").select("id, video_url, prompt, scene_prompts, character_id, connected_account_id, published_at, external_post_id, publish_status").in("id", videoIds)
+      : Promise.resolve({ data: [] } as any),
     supabase.from("characters").select("id, name, reference_image_url"),
   ]);
 
@@ -359,9 +342,17 @@ async function fetchSchedules(): Promise<ScheduledItem[]> {
     const scenes: string[] = isVideo && Array.isArray(src?.scene_prompts) ? src.scene_prompts : src?.prompt ? [src.prompt] : [];
     const media = isVideo ? src?.video_url : src?.image_url;
     const thumb = char?.reference_image_url || media || PLACEHOLDER;
-    const status: PublishStatus = r.status === "published" ? "published" : r.status === "failed" ? "failed" : r.status === "publishing" || src?.publish_status === "publishing" ? "publishing" : "scheduled";
-    const queueStatus: QueueStatus = status === "published" ? "published" : status === "failed" ? "failed" : status === "publishing" ? "publishing" : new Date(r.publish_time) <= new Date() ? "ready" : "waiting";
-    
+    const status: PublishStatus =
+      r.status === "published" ? "published"
+        : r.status === "failed" ? "failed"
+          : r.status === "publishing" || src?.publish_status === "publishing" ? "publishing"
+            : "scheduled";
+    const queueStatus: QueueStatus =
+      status === "published" ? "published"
+        : status === "failed" ? "failed"
+          : status === "publishing" ? "publishing"
+            : new Date(r.publish_time) <= new Date() ? "ready"
+              : "waiting";
     return {
       id: r.id,
       contentName: `${char?.name ?? "Lila"} — ${(scenes[0] ?? "Untitled").slice(0, 40)}`,
@@ -378,9 +369,9 @@ async function fetchSchedules(): Promise<ScheduledItem[]> {
       reviewStatus: "approved",
       externalPostId: src?.external_post_id ?? undefined,
       publishedAt: src?.published_at ?? undefined,
-      settings: { samplingSteps: 29 },
+      settings: { fps: 16, framesPerScene: 257, numScenes: scenes.length || 1, samplingSteps: 29 },
       scenePrompts: scenes,
-      negativePrompt: "low quality, blurry, distorted face",
+      negativePrompt: "low quality, blurry, distorted face, watermark",
       history: [
         { at: r.created_at, label: `Scheduled for ${new Date(r.publish_time).toLocaleString()}`, kind: "scheduled" },
         ...(src?.published_at ? [{ at: src.published_at, label: "Published", kind: "published" as const }] : []),
@@ -389,9 +380,7 @@ async function fetchSchedules(): Promise<ScheduledItem[]> {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Design System Badges
-// ---------------------------------------------------------------------------
+// ---------- Helpers ----------
 
 const statusStyle: Record<PublishStatus, string> = {
   scheduled: "bg-chart-2/15 text-chart-2 border-chart-2/30",
@@ -408,10 +397,16 @@ const queueStatusStyle: Record<QueueStatus, string> = {
   failed: "bg-destructive/15 text-destructive border-destructive/30",
 };
 
-const fmtTime = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-const fmtDate = (iso: string) => new Date(iso).toLocaleDateString([], { month: "short", day: "numeric" });
+const fmtTime = (iso: string) =>
+  new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const fmtDate = (iso: string) =>
+  new Date(iso).toLocaleDateString([], { month: "short", day: "numeric" });
 const fmtDateTime = (iso: string) => `${fmtDate(iso)} · ${fmtTime(iso)}`;
-const isSameDay = (a: Date, b: Date) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+
+const isSameDay = (a: Date, b: Date) =>
+  a.getFullYear() === b.getFullYear() &&
+  a.getMonth() === b.getMonth() &&
+  a.getDate() === b.getDate();
 
 function StatusBadge({ status }: { status: PublishStatus }) {
   return (
@@ -430,37 +425,166 @@ function QueueBadge({ status }: { status: QueueStatus }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Core Component Definition
-// ---------------------------------------------------------------------------
+// ---------- Accounts dialog ----------
+
+function AccountsDialog({
+  open,
+  onOpenChange,
+  accounts,
+  onRefresh,
+}: {
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+  accounts: ConnectedAccount[];
+  onRefresh: () => void;
+}) {
+  const [disconnecting, setDisconnecting] = useState<string | null>(null);
+
+  const disconnect = async (id: string) => {
+    setDisconnecting(id);
+    try {
+      const { error } = await supabase
+        .from("connected_accounts")
+        .update({ connection_status: "disconnected", access_token: null, refresh_token: null })
+        .eq("id", id);
+      if (error) throw error;
+      toast.success("Account disconnected");
+      onRefresh();
+    } catch (e: any) {
+      toast.error(e?.message ?? "Failed to disconnect");
+    } finally {
+      setDisconnecting(null);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Fanvue Accounts</DialogTitle>
+          <DialogDescription>
+            Connect your Fanvue account to publish content directly.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-3">
+          {accounts.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-border bg-muted/30 p-6 text-center">
+              <Plug className="mx-auto h-8 w-8 text-muted-foreground" />
+              <p className="mt-2 text-sm font-medium">No accounts connected</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Connect your Fanvue account to start publishing.
+              </p>
+            </div>
+          ) : (
+            accounts.map((a) => (
+              <div
+                key={a.id}
+                className="flex items-center justify-between rounded-lg border border-border bg-card p-3"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="grid h-9 w-9 place-items-center rounded-full bg-primary/10 text-primary font-semibold text-sm">
+                    {a.name.slice(0, 1).toUpperCase()}
+                  </div>
+                  <div>
+                    <p className="text-sm font-medium">{a.name}</p>
+                    <p className="text-xs text-muted-foreground">@{a.handle}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {a.status === "connected" ? (
+                    <Badge variant="outline" className="gap-1 border-success/40 text-success text-xs">
+                      <CheckCircle className="h-3 w-3" /> Connected
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline" className="gap-1 border-destructive/40 text-destructive text-xs">
+                      <XCircle className="h-3 w-3" /> Offline
+                    </Badge>
+                  )}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="text-destructive hover:text-destructive text-xs"
+                    disabled={disconnecting === a.id}
+                    onClick={() => disconnect(a.id)}
+                  >
+                    {disconnecting === a.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Disconnect"}
+                  </Button>
+                </div>
+              </div>
+            ))
+          )}
+
+          <div className="rounded-lg border border-border bg-muted/20 p-4">
+            <p className="text-xs font-medium text-foreground mb-1">Connect a new account</p>
+            <p className="text-xs text-muted-foreground mb-3">
+              You'll be redirected to Fanvue to authorise access. After approving, you'll return here automatically.
+            </p>
+            <Button
+              className="w-full gap-2"
+              onClick={() => {
+                onOpenChange(false);
+                startFanvueOAuth();
+              }}
+            >
+              <ExternalLink className="h-4 w-4" />
+              Connect Fanvue Account
+            </Button>
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Close</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---------- Page ----------
 
 function SchedulePage() {
   const queryClient = useQueryClient();
   const { data: scheduleData = EMPTY_SCHEDULE_ITEMS } = useQuery({ queryKey: ["schedules"], queryFn: fetchSchedules, staleTime: 10_000 });
   const { data: accounts = EMPTY_CONNECTED_ACCOUNTS, refetch: refetchAccounts } = useQuery({ queryKey: ["connected-accounts"], queryFn: fetchAccounts, staleTime: 60_000 });
   const [items, setItems] = useState<ScheduledItem[]>([]);
-  
   useEffect(() => setItems(scheduleData), [scheduleData]);
 
+  // ---- Handle OAuth callback (code in URL) ----
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const code = params.get("code");
     if (!code) return;
 
-    window.history.replaceState({}, "", window.location.pathname);
+    // Remove code from URL immediately to prevent re-processing on refresh
+    const clean = window.location.pathname;
+    window.history.replaceState({}, "", clean);
+
     toast.loading("Connecting Fanvue account…", { id: "fanvue-connect" });
-    
     exchangeFanvueCode(code)
       .then(() => {
         toast.success("Fanvue account connected!", { id: "fanvue-connect" });
         refetchAccounts();
+        queryClient.invalidateQueries({ queryKey: ["connected-accounts"] });
       })
       .catch((err) => {
         toast.error(err.message ?? "Failed to connect account", { id: "fanvue-connect" });
       });
-  }, [refetchAccounts]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const ch = supabase
+      .channel("schedules-rt")
+      .on("postgres_changes", { event: "*", schema: "public", table: "schedules" }, () =>
+        queryClient.invalidateQueries({ queryKey: ["schedules"] }),
+      )
+      .subscribe();
+    return () => { supabase.removeChannel(ch); };
+  }, [queryClient]);
 
   const characters = useMemo(() => Array.from(new Set(items.map((i) => i.character))), [items]);
+
   const [tab, setTab] = useState("calendar");
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | PublishStatus>("all");
@@ -507,7 +631,9 @@ function SchedulePage() {
           wkAhead.setDate(wkAhead.getDate() + 7);
           if (d < now || d > wkAhead) return false;
         }
-        if (rangeFilter === "month" && (d.getMonth() !== now.getMonth() || d.getFullYear() !== now.getFullYear())) return false;
+        if (rangeFilter === "month") {
+          if (d.getMonth() !== now.getMonth() || d.getFullYear() !== now.getFullYear()) return false;
+        }
       }
       if (search.trim()) {
         const q = search.toLowerCase();
@@ -517,7 +643,6 @@ function SchedulePage() {
       }
       return true;
     });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, statusFilter, accountFilter, characterFilter, rangeFilter, search]);
 
   const updateItem = (id: string, patch: Partial<ScheduledItem>) =>
@@ -538,7 +663,10 @@ function SchedulePage() {
     updateItem(id, {
       status: "scheduled",
       queueStatus: "ready",
-      history: [...(items.find((i) => i.id === id)?.history ?? []), { at: new Date().toISOString(), label: "Retry queued", kind: "retried" }],
+      history: [
+        ...(items.find((i) => i.id === id)?.history ?? []),
+        { at: new Date().toISOString(), label: "Retry queued", kind: "retried" },
+      ],
     });
     try {
       await scheduleService.update(id, { status: "scheduled" });
@@ -547,50 +675,80 @@ function SchedulePage() {
     } catch (e: any) { toast.error(e?.message ?? "Failed to retry"); }
   };
 
+  // ---- Real Fanvue publish ----
   const publishNow = async (id: string) => {
     const item = items.find((i) => i.id === id);
     if (!item) return;
 
     const account = accounts.find((a) => a.id === item.accountId);
     if (!account?.accessToken) {
-      toast.error("No Fanvue account connected for this item.", { action: { label: "Connect", onClick: () => setAccountsOpen(true) } });
+      toast.error("No Fanvue account connected for this item. Connect one first.", {
+        action: { label: "Connect", onClick: () => setAccountsOpen(true) },
+      });
+      return;
+    }
+    if (!item.mediaUrl) {
+      toast.error("No media URL found for this item.");
       return;
     }
 
     updateItem(id, { status: "publishing", queueStatus: "publishing" });
 
     try {
+      const caption = item.scenePrompts[0] ?? item.contentName;
+
+      // Call real Fanvue API
       const externalPostId = await publishToFanvue({
         accessToken: account.accessToken,
         mediaUrl: item.mediaUrl,
         mediaType: item.type,
-        caption: item.scenePrompts[0] ?? item.contentName,
+        caption,
       });
 
       const now = new Date().toISOString();
       const table = item.type === "image" ? "images" : "videos";
-      const { data: sRow } = await supabase.from("schedules").select("content_id").eq("id", id).single();
 
-      if (sRow?.content_id) {
-        await supabase.from(table).update({ publish_status: "published", published_at: now, external_post_id: externalPostId }).eq("id", sRow.content_id);
+      // Get content_id from schedules row
+      const { data: schedRow } = await supabase
+        .from("schedules")
+        .select("content_id")
+        .eq("id", id)
+        .single();
+
+      if (schedRow?.content_id) {
+        await supabase
+          .from(table)
+          .update({ publish_status: "published", published_at: now, external_post_id: externalPostId })
+          .eq("id", schedRow.content_id);
       }
 
       await scheduleService.update(id, { status: "published" });
+
       updateItem(id, {
         status: "published",
         queueStatus: "published",
         externalPostId,
         publishedAt: now,
-        history: [...item.history, { at: now, label: `Published to Fanvue (${account.name})`, kind: "published" }],
+        history: [
+          ...item.history,
+          { at: now, label: `Published to Fanvue (${account.name})`, kind: "published" },
+        ],
       });
 
-      toast.success(`Published to Fanvue @${account.handle}!`);
+      toast.success(`Published to Fanvue @${account.handle}!`, {
+        description: `Post ID: ${externalPostId}`,
+      });
       queryClient.invalidateQueries({ queryKey: ["schedules"] });
     } catch (e: any) {
       updateItem(id, { status: "failed", queueStatus: "failed" });
       try { await scheduleService.update(id, { status: "failed" }); } catch {}
       toast.error(`Publish failed: ${e?.message ?? "Unknown error"}`);
     }
+  };
+
+  const pauseItem = (id: string) => {
+    updateItem(id, { autoPublish: false });
+    toast.message("Auto-publish paused");
   };
 
   const [dragId, setDragId] = useState<string | null>(null);
@@ -603,12 +761,13 @@ function SchedulePage() {
     const newD = new Date(day);
     newD.setHours(oldD.getHours(), oldD.getMinutes(), 0, 0);
     const iso = newD.toISOString();
-    
     updateItem(dragId, {
       scheduledAt: iso,
-      history: [...item.history, { at: new Date().toISOString(), label: `Rescheduled to ${fmtDateTime(iso)}`, kind: "scheduled" }],
+      history: [
+        ...item.history,
+        { at: new Date().toISOString(), label: `Rescheduled to ${fmtDateTime(iso)}`, kind: "scheduled" },
+      ],
     });
-    
     try {
       await scheduleService.update(dragId, { publish_time: iso });
       toast.success("Schedule updated");
@@ -626,44 +785,63 @@ function SchedulePage() {
         <AppHeader />
         <main className="flex-1 overflow-y-auto bg-background">
           <div className="mx-auto max-w-[1400px] space-y-6 p-4 sm:p-6 lg:p-8">
+            {/* Header */}
             <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
               <div>
                 <Link to="/" className="mb-3 inline-flex items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground">
                   <ArrowLeft className="h-3.5 w-3.5" /> Dashboard
                 </Link>
                 <h1 className="font-display text-3xl font-semibold tracking-tight text-foreground">Scheduling</h1>
-                <p className="mt-1 text-sm text-muted-foreground">Plan and direct automated binary image streams directly to your Fanvue layout feed.</p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Plan, queue and publish approved content to your connected Fanvue accounts.
+                </p>
               </div>
               <div className="flex items-center gap-2">
-                <Button variant="outline" size="sm" className="gap-2" onClick={() => setAccountsOpen(true)}>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-2"
+                  onClick={() => setAccountsOpen(true)}
+                >
                   <Plug className="h-4 w-4" />
-                  {connectedCount > 0 ? <span>Accounts <span className="ml-1 inline-flex h-4 w-4 items-center justify-center rounded-full bg-success text-[10px] font-bold text-white">{connectedCount}</span></span> : "Connect Fanvue"}
+                  {connectedCount > 0 ? (
+                    <span>Accounts <span className="ml-1 inline-flex h-4 w-4 items-center justify-center rounded-full bg-success text-[10px] font-bold text-white">{connectedCount}</span></span>
+                  ) : "Connect Fanvue"}
                 </Button>
-                <Button size="sm" className="gap-2" onClick={() => setCreateOpen(true)}><CalendarPlus className="h-4 w-4" /> Schedule content</Button>
+                <Button size="sm" className="gap-2" onClick={() => setCreateOpen(true)}>
+                  <CalendarPlus className="h-4 w-4" /> Schedule content
+                </Button>
               </div>
             </div>
 
+            {/* No account warning banner */}
             {connectedCount === 0 && (
               <div className="flex items-center gap-3 rounded-lg border border-warning/30 bg-warning/5 px-4 py-3">
                 <AlertTriangle className="h-4 w-4 flex-shrink-0 text-warning" />
-                <p className="flex-1 text-sm text-foreground">No verification keys found. Sync your profile to start routing media nodes.</p>
-                <Button size="sm" variant="outline" className="gap-1.5" onClick={() => setAccountsOpen(true)}><ExternalLink className="h-3.5 w-3.5" /> Connect now</Button>
+                <p className="flex-1 text-sm text-foreground">
+                  No Fanvue account connected. Connect one to start publishing.
+                </p>
+                <Button size="sm" variant="outline" className="gap-1.5" onClick={() => setAccountsOpen(true)}>
+                  <ExternalLink className="h-3.5 w-3.5" /> Connect now
+                </Button>
               </div>
             )}
 
+            {/* Stats */}
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-              <DashboardCard label="Scheduled posts" value={stats.scheduled} icon={CalendarClock} accent="primary" hint="Awaiting execution" />
-              <DashboardCard label="Publishing today" value={stats.todayCount} icon={Clock} accent="chart-2" hint="Next 24 hours" />
+              <DashboardCard label="Scheduled posts" value={stats.scheduled} icon={CalendarClock} accent="primary" hint="Awaiting publish" />
+              <DashboardCard label="Publishing today" value={stats.todayCount} icon={Clock} accent="chart-2" hint="In the next 24h" />
               <DashboardCard label="Published this week" value={stats.weekPublished} icon={CheckCircle2} accent="chart-3" delta={12} />
-              <DashboardCard label="Failed publications" value={stats.failed} icon={AlertTriangle} accent="chart-5" hint={stats.failed ? "Action required" : "All clear"} />
-              <DashboardCard label="Connected profiles" value={`${stats.connectedAccounts}/${accounts.length}`} icon={Link2} accent="chart-4" hint="Fanvue Protocol" />
+              <DashboardCard label="Failed publications" value={stats.failed} icon={AlertTriangle} accent="chart-5" hint={stats.failed ? "Needs attention" : "All clear"} />
+              <DashboardCard label="Connected accounts" value={`${stats.connectedAccounts}/${accounts.length}`} icon={Link2} accent="chart-4" hint="Fanvue" />
             </div>
 
+            {/* Filters */}
             <Card className="border-border/60 bg-card">
               <CardContent className="flex flex-col gap-3 p-4 lg:flex-row lg:items-center">
                 <div className="relative flex-1">
                   <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                  <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search character, layout nodes or post logs..." className="pl-9" />
+                  <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search character, content, account, post ID…" className="pl-9" />
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <Filter className="h-4 w-4 text-muted-foreground" />
@@ -680,25 +858,42 @@ function SchedulePage() {
                   <Select value={accountFilter} onValueChange={setAccountFilter}>
                     <SelectTrigger className="h-9 w-[180px]"><SelectValue placeholder="Account" /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="all">All profiles</SelectItem>
+                      <SelectItem value="all">All accounts</SelectItem>
                       {accounts.map((a) => <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                  <Select value={characterFilter} onValueChange={setCharacterFilter}>
+                    <SelectTrigger className="h-9 w-[150px]"><SelectValue placeholder="Character" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All characters</SelectItem>
+                      {characters.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                  <Select value={rangeFilter} onValueChange={(v) => setRangeFilter(v as never)}>
+                    <SelectTrigger className="h-9 w-[140px]"><SelectValue placeholder="Date range" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">Any time</SelectItem>
+                      <SelectItem value="today">Today</SelectItem>
+                      <SelectItem value="week">Next 7 days</SelectItem>
+                      <SelectItem value="month">This month</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
               </CardContent>
             </Card>
 
+            {/* Tabs */}
             <Tabs value={tab} onValueChange={setTab}>
               <TabsList>
-                <TabsTrigger value="calendar">Calendar layout</TabsTrigger>
-                <TabsTrigger value="queue">Active Queue</TabsTrigger>
-                <TabsTrigger value="history">Historical logs</TabsTrigger>
+                <TabsTrigger value="calendar">Calendar view</TabsTrigger>
+                <TabsTrigger value="queue">Publishing queue</TabsTrigger>
+                <TabsTrigger value="history">Publishing history</TabsTrigger>
               </TabsList>
               <TabsContent value="calendar" className="mt-4">
                 <CalendarView weekStart={weekStart} setWeekStart={setWeekStart} items={filteredItems} getAccount={getAccount} onOpen={setSelected} onDragStart={setDragId} onDropOnDay={onDropOnDay} onSchedule={() => setCreateOpen(true)} />
               </TabsContent>
               <TabsContent value="queue" className="mt-4">
-                <QueueView items={filteredItems.filter((i) => ["scheduled", "publishing", "failed"].includes(i.status))} getAccount={getAccount} onOpen={setSelected} onPause={(id) => updateItem(id, { autoPublish: false })} onCancel={removeItem} onPublishNow={publishNow} onRetry={retryPublish} onSchedule={() => setCreateOpen(true)} />
+                <QueueView items={filteredItems.filter((i) => ["scheduled", "publishing", "failed"].includes(i.status))} getAccount={getAccount} onOpen={setSelected} onPause={pauseItem} onCancel={removeItem} onPublishNow={publishNow} onRetry={retryPublish} onSchedule={() => setCreateOpen(true)} />
               </TabsContent>
               <TabsContent value="history" className="mt-4">
                 <HistoryView items={filteredItems.filter((i) => ["published", "failed"].includes(i.status))} getAccount={getAccount} onOpen={setSelected} onRetry={retryPublish} />
@@ -710,190 +905,430 @@ function SchedulePage() {
 
       <DetailSheet item={selected} onClose={() => setSelected(null)} getAccount={getAccount} onRetry={retryPublish} onPublishNow={publishNow} onRemove={removeItem} />
       <CreateScheduleDialog open={createOpen} onOpenChange={setCreateOpen} />
-      <AccountsDialog open={accountsOpen} onOpenChange={setAccountsOpen} accounts={accounts} onRefresh={refetchAccounts} />
+      <AccountsDialog open={accountsOpen} onOpenChange={setAccountsOpen} accounts={accounts} onRefresh={() => { refetchAccounts(); queryClient.invalidateQueries({ queryKey: ["connected-accounts"] }); }} />
     </SidebarProvider>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Inline UI Views (Calendar, Queue, History)
-// ---------------------------------------------------------------------------
+// ---------- Calendar view ----------
 
-function CalendarView({ weekStart, setWeekStart, items, getAccount, onOpen, onDragStart, onDropOnDay, onSchedule }: any) {
+function CalendarView({ weekStart, setWeekStart, items, getAccount, onOpen, onDragStart, onDropOnDay, onSchedule }: {
+  weekStart: Date; setWeekStart: (d: Date) => void; items: ScheduledItem[];
+  getAccount: (id: string) => ConnectedAccount | undefined; onOpen: (i: ScheduledItem) => void;
+  onDragStart: (id: string | null) => void; onDropOnDay: (d: Date) => void; onSchedule: () => void;
+}) {
   const days = Array.from({ length: 7 }).map((_, idx) => { const d = new Date(weekStart); d.setDate(d.getDate() + idx); return d; });
-  const itemsByDay = (day: Date) => items.filter((i: any) => isSameDay(new Date(i.scheduledAt), day));
+  const move = (delta: number) => { const d = new Date(weekStart); d.setDate(d.getDate() + delta * 7); setWeekStart(d); };
+  const todayD = new Date();
+  const itemsByDay = (day: Date) => items.filter((i) => isSameDay(new Date(i.scheduledAt), day)).sort((a, b) => +new Date(a.scheduledAt) - +new Date(b.scheduledAt));
 
   return (
-    <div className="grid grid-cols-1 gap-2 lg:grid-cols-7">
-      {days.map((day) => {
-        const dayItems = itemsByDay(day);
-        return (
-          <div key={day.toISOString()} onDragOver={(e) => e.preventDefault()} onDrop={() => onDropOnDay(day)} className="min-h-[250px] rounded-xl border bg-card p-3">
-            <p className="text-xs font-bold text-muted-foreground">{day.toLocaleDateString([], { weekday: "short" })} {day.getDate()}</p>
-            <div className="mt-3 space-y-2">
-              {dayItems.map((i: any) => (
-                <div key={i.id} draggable onDragStart={() => onDragStart(i.id)} onClick={() => onOpen(i)} className="cursor-pointer rounded-lg border p-2 bg-background/50 hover:border-primary">
-                  <img src={i.thumbnail} className="h-16 w-full rounded object-cover" alt="" />
-                  <p className="mt-1 text-xs font-medium truncate">{i.character}</p>
-                </div>
-              ))}
-            </div>
+    <Card className="border-border/60 bg-card">
+      <CardContent className="p-4">
+        <div className="mb-4 flex items-center justify-between">
+          <div>
+            <p className="font-display text-lg font-semibold">{weekStart.toLocaleDateString([], { month: "long", year: "numeric" })}</p>
+            <p className="text-xs text-muted-foreground">Week of {fmtDate(weekStart.toISOString())} — drag cards between days to reschedule</p>
           </div>
+          <div className="flex items-center gap-1">
+            <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => move(-1)}><ChevronLeft className="h-4 w-4" /></Button>
+            <Button variant="outline" size="sm" className="h-8" onClick={() => { const d = new Date(); d.setHours(0,0,0,0); d.setDate(d.getDate()-d.getDay()); setWeekStart(d); }}>Today</Button>
+            <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => move(1)}><ChevronRight className="h-4 w-4" /></Button>
+          </div>
+        </div>
+        {items.length === 0 ? (
+          <EmptyState onSchedule={onSchedule} />
+        ) : (
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-7">
+            {days.map((day) => {
+              const dayItems = itemsByDay(day);
+              const isToday = isSameDay(day, todayD);
+              return (
+                <div key={day.toISOString()} onDragOver={(e) => e.preventDefault()} onDrop={() => onDropOnDay(day)}
+                  className={cn("flex min-h-[260px] flex-col rounded-lg border border-border/60 bg-background/40 p-2 transition-colors hover:border-primary/40")}>
+                  <div className="mb-2 flex items-baseline justify-between px-1">
+                    <p className={cn("text-[10px] font-medium uppercase tracking-wider", isToday ? "text-primary" : "text-muted-foreground")}>{day.toLocaleDateString([], { weekday: "short" })}</p>
+                    <p className={cn("font-display text-lg font-semibold", isToday ? "text-primary" : "text-foreground")}>{day.getDate()}</p>
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    {dayItems.map((i) => (<CalendarCard key={i.id} item={i} account={getAccount(i.accountId)} onOpen={() => onOpen(i)} onDragStart={() => onDragStart(i.id)} />))}
+                    {dayItems.length === 0 && <p className="px-1 pt-2 text-[11px] text-muted-foreground/70">Nothing scheduled</p>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function CalendarCard({ item, account, onOpen, onDragStart }: { item: ScheduledItem; account?: ConnectedAccount; onOpen: () => void; onDragStart: () => void }) {
+  return (
+    <button type="button" draggable onDragStart={onDragStart} onClick={onOpen}
+      className="group flex flex-col gap-1.5 rounded-md border border-border/60 bg-card p-1.5 text-left transition-all hover:border-primary/50 hover:shadow-[0_0_20px_-8px_var(--primary)]">
+      <div className="relative h-16 w-full overflow-hidden rounded">
+        <img src={item.thumbnail} alt={item.contentName} className="h-full w-full object-cover" />
+        <div className="absolute left-1 top-1 grid h-5 w-5 place-items-center rounded bg-black/60 backdrop-blur">
+          {item.type === "video" ? <VideoIcon className="h-3 w-3 text-white" /> : <ImageIcon className="h-3 w-3 text-white" />}
+        </div>
+        <div className="absolute right-1 top-1"><StatusBadge status={item.status} /></div>
+      </div>
+      <div className="px-0.5">
+        <p className="truncate text-xs font-medium text-foreground">{item.character}</p>
+        <div className="mt-0.5 flex items-center justify-between">
+          <span className="text-[10px] text-muted-foreground">{fmtTime(item.scheduledAt)}</span>
+          <span className="truncate text-[10px] text-muted-foreground">{account?.name.replace("Fanvue Account ", "Acc ")}</span>
+        </div>
+      </div>
+    </button>
+  );
+}
+
+// ---------- Queue view ----------
+
+function QueueView({ items, getAccount, onOpen, onPause, onCancel, onPublishNow, onRetry, onSchedule }: {
+  items: ScheduledItem[]; getAccount: (id: string) => ConnectedAccount | undefined;
+  onOpen: (i: ScheduledItem) => void; onPause: (id: string) => void; onCancel: (id: string) => void;
+  onPublishNow: (id: string) => void; onRetry: (id: string) => void; onSchedule: () => void;
+}) {
+  if (items.length === 0) return <Card className="border-border/60 bg-card"><CardContent className="p-4"><EmptyState onSchedule={onSchedule} message="The publishing queue is empty." /></CardContent></Card>;
+
+  return (
+    <div className="grid gap-3">
+      {items.map((i) => {
+        const account = getAccount(i.accountId);
+        return (
+          <Card key={i.id} className="border-border/60 bg-card transition-colors hover:border-primary/40">
+            <CardContent className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center">
+              <button type="button" onClick={() => onOpen(i)} className="relative h-20 w-32 shrink-0 overflow-hidden rounded-md bg-muted">
+                <img src={i.thumbnail} alt={i.contentName} className="h-full w-full object-cover transition-transform hover:scale-105" />
+                {i.type === "video" && <div className="absolute inset-0 grid place-items-center bg-black/30"><Play className="h-5 w-5 text-white" /></div>}
+              </button>
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="truncate text-sm font-semibold text-foreground">{i.contentName}</p>
+                  <QueueBadge status={i.queueStatus} />
+                  {!i.autoPublish && <span className="rounded border border-border bg-muted px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground">manual</span>}
+                </div>
+                <p className="mt-0.5 text-xs text-muted-foreground">{i.character} · {account?.name ?? "Unknown account"}</p>
+                <p className="mt-1 inline-flex items-center gap-1 text-xs text-muted-foreground"><Clock className="h-3 w-3" />{fmtDateTime(i.scheduledAt)}</p>
+              </div>
+              <div className="flex items-center gap-1.5">
+                {i.status === "failed" ? (
+                  <Button size="sm" variant="outline" className="gap-1.5" onClick={() => onRetry(i.id)}><RefreshCw className="h-3.5 w-3.5" /> Retry</Button>
+                ) : (
+                  <Button size="sm" variant="outline" className="gap-1.5" onClick={() => onPublishNow(i.id)} disabled={i.status === "publishing"}>
+                    {i.status === "publishing" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+                    {i.status === "publishing" ? "Publishing…" : "Publish now"}
+                  </Button>
+                )}
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="h-8 w-8"><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem onClick={() => onOpen(i)}><Eye className="mr-2 h-4 w-4" /> View details</DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => onOpen(i)}><Edit3 className="mr-2 h-4 w-4" /> Edit</DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => onPause(i.id)}><Pause className="mr-2 h-4 w-4" /> Pause auto-publish</DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={() => onCancel(i.id)} className="text-destructive focus:text-destructive"><Trash2 className="mr-2 h-4 w-4" /> Cancel</DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+            </CardContent>
+          </Card>
         );
       })}
     </div>
   );
 }
 
-function QueueView({ items, getAccount, onOpen, onCancel, onPublishNow, onRetry, onSchedule }: any) {
-  if (!items.length) return <EmptyState onSchedule={onSchedule} />;
+// ---------- History view ----------
+
+function HistoryView({ items, getAccount, onOpen, onRetry }: {
+  items: ScheduledItem[]; getAccount: (id: string) => ConnectedAccount | undefined;
+  onOpen: (i: ScheduledItem) => void; onRetry: (id: string) => void;
+}) {
+  if (items.length === 0) return (
+    <Card className="border-border/60 bg-card"><CardContent className="p-10">
+      <div className="mx-auto max-w-md text-center"><Inbox className="mx-auto h-10 w-10 text-muted-foreground/60" /><p className="mt-3 font-medium text-foreground">No publishing history yet</p><p className="mt-1 text-sm text-muted-foreground">Published and failed posts will appear here.</p></div>
+    </CardContent></Card>
+  );
+
   return (
-    <div className="space-y-2">
-      {items.map((i: any) => (
-        <Card key={i.id} className="p-3 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <img src={i.thumbnail} className="h-12 w-16 rounded object-cover" alt="" />
-            <div>
-              <p className="text-sm font-semibold">{i.contentName}</p>
-              <p className="text-xs text-muted-foreground">{fmtDateTime(i.scheduledAt)}</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <QueueBadge status={i.queueStatus} />
-            <Button size="sm" onClick={() => onPublishNow(i.id)} disabled={i.status === "publishing"}>Publish Now</Button>
-            <Button size="icon" variant="ghost" className="text-destructive" onClick={() => onCancel(i.id)}><Trash2 className="h-4 w-4" /></Button>
-          </div>
-        </Card>
-      ))}
+    <Card className="border-border/60 bg-card">
+      <CardContent className="p-0">
+        <div className="grid grid-cols-12 gap-3 border-b border-border/60 px-4 py-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+          <div className="col-span-5">Content</div><div className="col-span-2">Account</div><div className="col-span-2">Publish date</div><div className="col-span-2">Post ID</div><div className="col-span-1 text-right">Status</div>
+        </div>
+        {items.map((i) => {
+          const account = getAccount(i.accountId);
+          return (
+            <button key={i.id} type="button" onClick={() => onOpen(i)}
+              className="grid w-full grid-cols-12 items-center gap-3 border-b border-border/40 px-4 py-3 text-left transition-colors hover:bg-muted/40 last:border-b-0">
+              <div className="col-span-5 flex items-center gap-3">
+                <div className="relative h-12 w-16 shrink-0 overflow-hidden rounded">
+                  <img src={i.thumbnail} alt={i.contentName} className="h-full w-full object-cover" />
+                  {i.type === "video" && <div className="absolute inset-0 grid place-items-center bg-black/30"><Play className="h-3.5 w-3.5 text-white" /></div>}
+                </div>
+                <div className="min-w-0"><p className="truncate text-sm font-medium text-foreground">{i.contentName}</p><p className="truncate text-xs text-muted-foreground">{i.character}</p></div>
+              </div>
+              <div className="col-span-2 text-xs text-muted-foreground"><p className="truncate text-foreground">{account?.name}</p><p className="truncate">{account?.handle}</p></div>
+              <div className="col-span-2 text-xs text-muted-foreground">{i.publishedAt ? fmtDateTime(i.publishedAt) : fmtDateTime(i.scheduledAt)}</div>
+              <div className="col-span-2 truncate font-mono text-[11px] text-muted-foreground">{i.externalPostId ?? "—"}</div>
+              <div className="col-span-1 flex items-center justify-end gap-2">
+                <StatusBadge status={i.status} />
+                {i.status === "failed" && <Button size="icon" variant="ghost" className="h-7 w-7" onClick={(e) => { e.stopPropagation(); onRetry(i.id); }}><RefreshCw className="h-3.5 w-3.5" /></Button>}
+              </div>
+            </button>
+          );
+        })}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ---------- Empty state ----------
+
+function EmptyState({ onSchedule, message = "No scheduled content." }: { onSchedule: () => void; message?: string }) {
+  return (
+    <div className="mx-auto max-w-md py-10 text-center">
+      <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl border border-border/60 bg-background"><CalendarClock className="h-6 w-6 text-muted-foreground" /></div>
+      <p className="mt-4 font-display text-lg font-semibold text-foreground">{message}</p>
+      <p className="mt-1 text-sm text-muted-foreground">Pick an approved asset from the library and schedule it to a connected Fanvue account.</p>
+      <Button size="sm" className="mt-5 gap-2" onClick={onSchedule}><CalendarPlus className="h-4 w-4" /> Schedule content</Button>
     </div>
   );
 }
 
-function HistoryView({ items, getAccount, onOpen }: any) {
-  if (!items.length) return <div className="text-center p-10 text-muted-foreground">No historical logs found.</div>;
-  return (
-    <div className="space-y-2">
-      {items.map((i: any) => (
-        <Card key={i.id} className="p-3 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <img src={i.thumbnail} className="h-12 w-16 rounded object-cover" alt="" />
-            <div>
-              <p className="text-sm font-semibold">{i.contentName}</p>
-              <p className="text-xs text-muted-foreground">Post Key: <span className="font-mono text-[11px]">{i.externalPostId ?? "N/A"}</span></p>
-            </div>
-          </div>
-          <StatusBadge status={i.status} />
-        </Card>
-      ))}
-    </div>
-  );
-}
+// ---------- Detail sheet ----------
 
-function DetailSheet({ item, onClose, onPublishNow, onRemove }: any) {
+function DetailSheet({ item, onClose, getAccount, onRetry, onPublishNow, onRemove }: {
+  item: ScheduledItem | null; onClose: () => void; getAccount: (id: string) => ConnectedAccount | undefined;
+  onRetry: (id: string) => void; onPublishNow: (id: string) => void; onRemove: (id: string) => void;
+}) {
+  const account = item ? getAccount(item.accountId) : undefined;
   return (
-    <Sheet open={!!item} onOpenChange={onClose}>
-      <SheetContent>
+    <Sheet open={!!item} onOpenChange={(o) => !o && onClose()}>
+      <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
         {item && (
-          <div className="space-y-4 pt-4">
+          <>
             <SheetHeader>
-              <SheetTitle>{item.contentName}</SheetTitle>
-              <SheetDescription>{item.character} · Image File Pipeline</SheetDescription>
+              <SheetTitle className="flex items-center gap-2">{item.contentName}<StatusBadge status={item.status} /></SheetTitle>
+              <SheetDescription>{item.character} · {item.type === "video" ? "Video" : "Image"} · {fmtDateTime(item.scheduledAt)}</SheetDescription>
             </SheetHeader>
-            <img src={item.mediaUrl || item.thumbnail} className="w-full rounded-lg object-cover aspect-video" alt="" />
-            <div className="flex gap-2">
-              <Button onClick={() => onPublishNow(item.id)} className="w-full">Fire Payload Node</Button>
-              <Button variant="outline" className="text-destructive" onClick={() => onRemove(item.id)}><Trash2 className="h-4 w-4" /></Button>
+            <div className="mt-6 space-y-6">
+              <div className="relative aspect-video overflow-hidden rounded-lg bg-muted">
+                {item.type === "video" ? (
+                  <video src={item.mediaUrl || item.thumbnail} controls playsInline className="h-full w-full object-cover" />
+                ) : (
+                  <img src={item.mediaUrl || item.thumbnail} alt={item.contentName} className="h-full w-full object-cover" />
+                )}
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Scheduled" value={fmtDateTime(item.scheduledAt)} />
+                <Field label="Connected account" value={account ? `${account.name} (@${account.handle})` : "—"} />
+                <Field label="Mode" value={item.autoPublish ? "Auto publish" : "Manual publish"} />
+                <Field label="Review status" value="Approved" />
+              </div>
+              <div>
+                <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Generation settings</p>
+                <div className="grid grid-cols-4 gap-2">
+                  <Mini label="FPS" value={item.settings.fps} />
+                  <Mini label="Frames" value={item.settings.framesPerScene} />
+                  <Mini label="Scenes" value={item.settings.numScenes} />
+                  <Mini label="Steps" value={item.settings.samplingSteps} />
+                </div>
+              </div>
+              <div>
+                <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Scene prompts</p>
+                <ScrollArea className="h-40 rounded-md border border-border bg-background/40 p-3">
+                  <ol className="space-y-2 text-xs text-foreground">
+                    {item.scenePrompts.map((p, idx) => <li key={idx} className="leading-relaxed"><span className="mr-1 text-muted-foreground">{idx + 1}.</span>{p}</li>)}
+                  </ol>
+                </ScrollArea>
+              </div>
+              {(item.externalPostId || item.publishedAt) && (
+                <div className="grid grid-cols-2 gap-3">
+                  {item.publishedAt && <Field label="Published at" value={fmtDateTime(item.publishedAt)} />}
+                  {item.externalPostId && <Field label="Fanvue Post ID" value={item.externalPostId} mono />}
+                </div>
+              )}
+              <div>
+                <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Publishing history</p>
+                <ol className="relative space-y-3 border-l border-border pl-4">
+                  {item.history.map((h, idx) => (
+                    <li key={idx} className="relative">
+                      <span className="absolute -left-[21px] top-1 h-2.5 w-2.5 rounded-full bg-primary ring-4 ring-background" />
+                      <p className="text-xs font-medium text-foreground">{h.label}</p>
+                      <p className="text-[11px] text-muted-foreground">{fmtDateTime(h.at)}</p>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+              <Separator />
+              <div className="flex flex-wrap items-center gap-2">
+                {item.status === "failed" ? (
+                  <Button size="sm" className="gap-2" onClick={() => onRetry(item.id)}><RefreshCw className="h-4 w-4" /> Retry publication</Button>
+                ) : item.status !== "published" ? (
+                  <Button size="sm" className="gap-2" onClick={() => onPublishNow(item.id)} disabled={item.status === "publishing"}>
+                    {item.status === "publishing" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                    {item.status === "publishing" ? "Publishing…" : "Publish now"}
+                  </Button>
+                ) : null}
+                <Button size="sm" variant="outline" className="gap-2 text-destructive hover:text-destructive" onClick={() => onRemove(item.id)}>
+                  <Trash2 className="h-4 w-4" /> Remove schedule
+                </Button>
+              </div>
             </div>
-          </div>
+          </>
         )}
       </SheetContent>
     </Sheet>
   );
 }
 
-function CreateScheduleDialog({ open, onOpenChange }: any) {
+function Field({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="rounded-md border border-border bg-background/40 p-3">
+      <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">{label}</p>
+      <p className={cn("mt-1 text-sm text-foreground", mono && "font-mono text-xs break-all")}>{value}</p>
+    </div>
+  );
+}
+
+function Mini({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="rounded-md border border-border bg-background/40 p-2 text-center">
+      <p className="font-display text-lg font-semibold text-foreground">{value}</p>
+      <p className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</p>
+    </div>
+  );
+}
+
+// ---------- Create dialog ----------
+
+type ApprovedAsset = { id: string; type: "image" | "video"; name: string; character: string; thumbnail: string };
+const EMPTY_APPROVED_ASSETS: ApprovedAsset[] = [];
+
+async function fetchApprovedAssets(): Promise<ApprovedAsset[]> {
+  const [imgRes, vidRes, charRes] = await Promise.all([
+    supabase.from("images").select("id, image_url, prompt, character_id").eq("status", "approved"),
+    supabase.from("videos").select("id, video_url, prompt, character_id").eq("status", "approved"),
+    supabase.from("characters").select("id, name, reference_image_url"),
+  ]);
+  const charMap = new Map((charRes.data ?? []).map((c: any) => [c.id, c]));
+  const imgs: ApprovedAsset[] = (imgRes.data ?? []).map((i: any) => ({
+    id: i.id, type: "image",
+    name: `${charMap.get(i.character_id)?.name ?? "Lila"} — ${(i.prompt ?? "Image").slice(0, 40)}`,
+    character: charMap.get(i.character_id)?.name ?? "Lila",
+    thumbnail: i.image_url ?? charMap.get(i.character_id)?.reference_image_url ?? "",
+  }));
+  const vids: ApprovedAsset[] = (vidRes.data ?? []).map((v: any) => ({
+    id: v.id, type: "video",
+    name: `${charMap.get(v.character_id)?.name ?? "Lila"} — ${(v.prompt ?? "Video").slice(0, 40)}`,
+    character: charMap.get(v.character_id)?.name ?? "Lila",
+    thumbnail: charMap.get(v.character_id)?.reference_image_url ?? "",
+  }));
+  return [...imgs, ...vids];
+}
+
+function CreateScheduleDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
   const queryClient = useQueryClient();
-  const { data: assets = [] } = useQuery({ queryKey: ["approved-assets"], queryFn: fetchApprovedAssets, enabled: open });
-  const { data: accounts = [] } = useQuery({ queryKey: ["connected-accounts"], queryFn: fetchAccounts, enabled: open });
+  const { data: assets = EMPTY_APPROVED_ASSETS } = useQuery({ queryKey: ["approved-assets"], queryFn: fetchApprovedAssets, enabled: open });
+  const { data: accounts = EMPTY_CONNECTED_ACCOUNTS } = useQuery({ queryKey: ["connected-accounts"], queryFn: fetchAccounts, enabled: open });
 
-  const [assetIdx, setAssetIdx] = useState("0");
-  const [accId, setAccId] = useState("");
-  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [time, setTime] = useState("12:00");
+  const [contentIdx, setContentIdx] = useState("0");
+  const [accountId, setAccountId] = useState("");
+  const [date, setDate] = useState(() => { const d = new Date(); d.setDate(d.getDate() + 1); return d.toISOString().slice(0, 10); });
+  const [time, setTime] = useState("18:00");
+  const [autoPublish, setAutoPublish] = useState(true);
+  const [notes, setNotes] = useState("");
 
-  useEffect(() => { if (accounts.length) setAccId(accounts[0].id); }, [accounts]);
+  useEffect(() => { if (accounts.length && !accountId) setAccountId(accounts[0].id); }, [accounts, accountId]);
 
-  const save = async () => {
-    const asset = assets[Number(assetIdx)];
-    if (!asset || !accId) return;
+  const submit = async () => {
+    const asset = assets[Number(contentIdx)];
+    if (!asset) { toast.error("Pick an approved asset first"); return; }
+    if (!accountId) { toast.error("Connect a Fanvue account first"); return; }
+    const iso = new Date(`${date}T${time}:00`).toISOString();
     try {
-      const { data: u } = await supabase.auth.getUser();
+      const { data: userRes } = await supabase.auth.getUser();
       await scheduleService.create({
         content_type: asset.type,
         content_id: asset.id,
-        publish_time: new Date(`${date}T${time}:00`).toISOString(),
+        publish_time: iso,
         platform: "Fanvue",
         status: "scheduled",
-        created_by: u.user?.id,
+        created_by: userRes.user?.id ?? null,
       } as any);
-      await supabase.from(asset.type === "image" ? "images" : "videos").update({ connected_account_id: accId }).eq("id", asset.id);
-      toast.success("Scheduled successfully");
+      const table = asset.type === "image" ? "images" : "videos";
+      await supabase.from(table).update({ connected_account_id: accountId }).eq("id", asset.id);
+      toast.success("Content scheduled");
       queryClient.invalidateQueries({ queryKey: ["schedules"] });
       onOpenChange(false);
-    } catch (e: any) { toast.error(e.message); }
+      setNotes("");
+    } catch (e: any) { toast.error(e?.message ?? "Failed to schedule"); }
   };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader><DialogTitle>Schedule Stream Node</DialogTitle></DialogHeader>
-        <div className="space-y-3">
-          <Label>Approved Node</Label>
-          <Select value={assetIdx} onValueChange={setAssetIdx}>
-            <SelectTrigger><SelectValue /></SelectTrigger>
-            <SelectContent>{assets.map((a, idx) => <SelectItem key={a.id} value={String(idx)}>{a.name}</SelectItem>)}</SelectContent>
-          </Select>
-          <Label>Target Account</Label>
-          <Select value={accId} onValueChange={setAccId}>
-            <SelectTrigger><SelectValue /></SelectTrigger>
-            <SelectContent>{accounts.map((a) => <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>)}</SelectContent>
-          </Select>
-          <div className="flex gap-2">
-            <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
-            <Input type="time" value={time} onChange={(e) => setTime(e.target.value)} />
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Schedule content</DialogTitle>
+          <DialogDescription>Queue an approved asset for publishing to a connected Fanvue account.</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="space-y-1.5">
+            <Label>Content</Label>
+            {assets.length === 0 ? (
+              <p className="rounded-md border border-dashed border-border bg-muted/30 p-3 text-xs text-muted-foreground">No approved content yet. Approve images or videos in the Review Queue first.</p>
+            ) : (
+              <Select value={contentIdx} onValueChange={setContentIdx}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>{assets.map((a, idx) => <SelectItem key={a.id} value={String(idx)}>{a.name}</SelectItem>)}</SelectContent>
+              </Select>
+            )}
           </div>
-        </div>
-        <DialogFooter><Button onClick={save}>Enlist Schedule</Button></DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function AccountsDialog({ open, onOpenChange, accounts, onRefresh }: any) {
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader><DialogTitle>Linked Profiles</DialogTitle></DialogHeader>
-        <div className="space-y-2">
-          {accounts.map((a: any) => (
-            <div key={a.id} className="flex justify-between items-center border p-2 rounded">
-              <div><p className="text-sm font-bold">{a.name}</p><p className="text-xs text-muted-foreground">@{a.handle}</p></div>
-              <Badge variant={a.status === "connected" ? "default" : "destructive"}>{a.status}</Badge>
+          <div className="space-y-1.5">
+            <Label>Publishing account</Label>
+            {accounts.length === 0 ? (
+              <div className="rounded-md border border-dashed border-border bg-muted/30 p-3">
+                <p className="text-xs text-muted-foreground mb-2">No Fanvue account connected yet.</p>
+                <Button size="sm" className="gap-2 w-full" onClick={() => { onOpenChange(false); startFanvueOAuth(); }}>
+                  <ExternalLink className="h-3.5 w-3.5" /> Connect Fanvue Account
+                </Button>
+              </div>
+            ) : (
+              <Select value={accountId} onValueChange={setAccountId}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>{accounts.map((a) => <SelectItem key={a.id} value={a.id} disabled={a.status !== "connected"}>{a.name} {a.status !== "connected" ? "· offline" : ""}</SelectItem>)}</SelectContent>
+              </Select>
+            )}
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5"><Label>Date</Label><Input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
+            <div className="space-y-1.5"><Label>Time</Label><Input type="time" value={time} onChange={(e) => setTime(e.target.value)} /></div>
+          </div>
+          <div className="space-y-1.5">
+            <Label>Publishing notes</Label>
+            <Textarea rows={3} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Optional context for reviewers or publishers…" />
+          </div>
+          <label className="flex items-center justify-between rounded-md border border-border bg-background/40 p-3">
+            <div>
+              <p className="text-sm font-medium text-foreground">Auto publish</p>
+              <p className="text-xs text-muted-foreground">Push automatically at the scheduled time.</p>
             </div>
-          ))}
-          <Button className="w-full mt-2" onClick={startFanvueOAuth}>Authorize New Profile Pair</Button>
+            <input type="checkbox" checked={autoPublish} onChange={(e) => setAutoPublish(e.target.checked)} className="h-4 w-4 accent-primary" />
+          </label>
         </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button onClick={submit} className="gap-2" disabled={!assets.length || !accounts.length}>
+            <CalendarPlus className="h-4 w-4" /> Schedule
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
-  );
-}
-
-function EmptyState({ onSchedule }: { onSchedule: () => void }) {
-  return (
-    <div className="text-center py-8">
-      <Inbox className="mx-auto h-8 w-8 text-muted-foreground/60" />
-      <p className="mt-2 text-sm font-medium">No files listed in this workspace context.</p>
-      <Button size="sm" className="mt-3" onClick={onSchedule}>Schedule Asset Node</Button>
-    </div>
   );
 }
