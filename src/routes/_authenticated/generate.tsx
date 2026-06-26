@@ -1,4 +1,3 @@
-
 import { createFileRoute } from "@tanstack/react-router";
 import { useMemo, useRef, useState, useEffect, useCallback } from "react";
 import type { ReactNode } from "react";
@@ -61,10 +60,6 @@ const RUNPOD_ENDPOINT_ID       = import.meta.env.VITE_RUNPOD_ENDPOINT_ID as stri
 const RUNPOD_IMAGE_ENDPOINT_ID = (import.meta.env.VITE_RUNPOD_IMAGE_ENDPOINT_ID as string) ?? "qwen-image-edit-2511-lora";
 const RUNPOD_BASE              = `https://api.runpod.ai/v2/${RUNPOD_ENDPOINT_ID}`;
 const RUNPOD_IMAGE_BASE        = `https://api.runpod.ai/v2/${RUNPOD_IMAGE_ENDPOINT_ID}`;
-
-// ---- Supabase Storage buckets ----
-const VIDEO_BUCKET = "videos";   // existing bucket — works fine
-const IMAGE_BUCKET = "images";   // create this in Supabase → Storage → New Bucket → "images" → Public ✓
 
 const JOB_STORAGE_KEY       = "lila_video_job";
 const IMAGE_JOB_STORAGE_KEY = "lila_image_job";
@@ -213,35 +208,7 @@ async function fileToBase64(file: File): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// Supabase storage upload helper
-// bucket param lets video use VIDEO_BUCKET and image use IMAGE_BUCKET
-// ---------------------------------------------------------------------------
-async function uploadToBucketAndGetUrl(
-  runpodUrl: string,
-  storagePath: string,
-  mimeType: string,
-  bucket: string = VIDEO_BUCKET   // default = videos, images pass IMAGE_BUCKET
-): Promise<string> {
-  console.log(`[bucket] Fetching from RunPod: ${runpodUrl}`);
-  const resp = await fetch(runpodUrl);
-  if (!resp.ok) throw new Error(`Failed to fetch output from RunPod (${resp.status} ${resp.statusText})`);
-  const blob = await resp.blob();
-  console.log(`[bucket] Fetched blob size: ${blob.size} type: ${blob.type}`);
-
-  console.log(`[bucket] Uploading to Supabase bucket: ${bucket} path: ${storagePath}`);
-  const { error: uploadError } = await supabase.storage
-    .from(bucket)
-    .upload(storagePath, blob, { contentType: mimeType, upsert: true });
-
-  if (uploadError) throw new Error(`Supabase Storage upload failed: ${uploadError.message}`);
-
-  const { data } = supabase.storage.from(bucket).getPublicUrl(storagePath);
-  console.log(`[bucket] Public URL: ${data.publicUrl}`);
-  return data.publicUrl;
-}
-
-// ---------------------------------------------------------------------------
-// DB save helpers
+// DB save helpers — store the RunPod URL directly, no re-upload needed
 // ---------------------------------------------------------------------------
 async function saveVideoToLibrary(params: {
   videoUrl: string;
@@ -251,12 +218,8 @@ async function saveVideoToLibrary(params: {
   framesPerScene: number;
   samplingSteps: number;
 }): Promise<void> {
-  const timestamp = Date.now();
-  const storagePath = `videos/${timestamp}.mp4`;
-  // Videos go into VIDEO_BUCKET (default)
-  const publicUrl = await uploadToBucketAndGetUrl(params.videoUrl, storagePath, "video/mp4", VIDEO_BUCKET);
   const { error } = await supabase.from("videos").insert({
-    video_url: publicUrl,
+    video_url: params.videoUrl,
     prompt: params.prompt,
     scene_prompts: params.scenePrompts,
     status: "pending",
@@ -269,13 +232,8 @@ async function saveImageToLibrary(params: {
   imageUrl: string;
   prompt: string;
 }): Promise<void> {
-  const timestamp = Date.now();
-  // FIX: images use IMAGE_BUCKET ("images") not VIDEO_BUCKET ("videos")
-  // No subfolder needed since it's already in the "images" bucket
-  const storagePath = `${timestamp}.jpg`;
-  const publicUrl = await uploadToBucketAndGetUrl(params.imageUrl, storagePath, "image/jpeg", IMAGE_BUCKET);
   const { error } = await supabase.from("images").insert({
-    image_url: publicUrl,
+    image_url: params.imageUrl,
     prompt: params.prompt,
     status: "pending",
     publish_status: null,
@@ -616,7 +574,6 @@ function ImageGenerationTab() {
           let savedToLibrary = false;
           let saveErrMsg = "";
           try {
-            // FIX: saveImageToLibrary now uses IMAGE_BUCKET ("images") not VIDEO_BUCKET ("videos")
             await saveImageToLibrary({ imageUrl: imgUrl, prompt: submittedPromptRef.current });
             savedToLibrary = true;
             toast.success("Image ready & saved to library!", {
