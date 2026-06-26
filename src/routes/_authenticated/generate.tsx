@@ -208,8 +208,51 @@ async function fileToBase64(file: File): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// Supabase save helpers
+// Supabase bucket + DB save helpers
 // ---------------------------------------------------------------------------
+const SUPABASE_BUCKET = "videos"; // your bucket name
+
+/**
+ * 1. Fetch the file from the RunPod URL as a blob
+ * 2. Upload it to Supabase Storage bucket
+ * 3. Get the public URL
+ * 4. Insert a row in the DB pointing to that public URL
+ *
+ * Falls back to saving the original RunPod URL directly if the fetch/upload
+ * fails (e.g. CORS), so the library entry still gets created.
+ */
+async function uploadToBucketAndGetUrl(
+  runpodUrl: string,
+  storagePath: string,
+  mimeType: string
+): Promise<string> {
+  // Step 1 — download the file from RunPod
+  let blob: Blob;
+  try {
+    const resp = await fetch(runpodUrl);
+    if (!resp.ok) throw new Error(`Fetch failed: ${resp.status}`);
+    blob = await resp.blob();
+  } catch (e) {
+    console.warn("Could not fetch from RunPod for re-upload, using original URL:", e);
+    // Return the RunPod URL directly so DB insert still works
+    return runpodUrl;
+  }
+
+  // Step 2 — upload to Supabase Storage
+  const { error: uploadError } = await supabase.storage
+    .from(SUPABASE_BUCKET)
+    .upload(storagePath, blob, { contentType: mimeType, upsert: true });
+
+  if (uploadError) {
+    console.warn("Supabase upload error, using original URL:", uploadError.message);
+    return runpodUrl;
+  }
+
+  // Step 3 — get public URL
+  const { data } = supabase.storage.from(SUPABASE_BUCKET).getPublicUrl(storagePath);
+  return data.publicUrl;
+}
+
 async function saveVideoToLibrary(params: {
   videoUrl: string;
   prompt: string;
@@ -218,27 +261,39 @@ async function saveVideoToLibrary(params: {
   framesPerScene: number;
   samplingSteps: number;
 }): Promise<void> {
+  const timestamp = Date.now();
+  const storagePath = `videos/${timestamp}.mp4`;
+
+  // Upload to bucket (falls back to RunPod URL on failure)
+  const publicUrl = await uploadToBucketAndGetUrl(params.videoUrl, storagePath, "video/mp4");
+
   const { error } = await supabase.from("videos").insert({
-    video_url: params.videoUrl,
+    video_url: publicUrl,
     prompt: params.prompt,
     scene_prompts: params.scenePrompts,
     status: "pending",
     publish_status: null,
   });
-  if (error) throw new Error(error.message);
+  if (error) throw new Error(`DB insert failed: ${error.message}`);
 }
 
 async function saveImageToLibrary(params: {
   imageUrl: string;
   prompt: string;
 }): Promise<void> {
+  const timestamp = Date.now();
+  const storagePath = `images/${timestamp}.jpg`;
+
+  // Upload to bucket (falls back to RunPod URL on failure)
+  const publicUrl = await uploadToBucketAndGetUrl(params.imageUrl, storagePath, "image/jpeg");
+
   const { error } = await supabase.from("images").insert({
-    image_url: params.imageUrl,
+    image_url: publicUrl,
     prompt: params.prompt,
     status: "pending",
     publish_status: null,
   });
-  if (error) throw new Error(error.message);
+  if (error) throw new Error(`DB insert failed: ${error.message}`);
 }
 
 // ---------------------------------------------------------------------------
