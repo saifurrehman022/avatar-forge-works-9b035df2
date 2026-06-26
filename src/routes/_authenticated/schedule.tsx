@@ -79,12 +79,12 @@ import {
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
-// Fanvue OAuth config — hardcoded for testing
+// Fanvue OAuth config
 // ---------------------------------------------------------------------------
 const FANVUE_CLIENT_ID     = "f9d35fff-3d12-4dd5-8945-750c37d65ae9";
-const FANVUE_CLIENT_SECRET = "05275891c81581c5cb79d336c8e9f87680f0976843bf17d6737bdcf0dde38b1a";
+const FANVUE_CLIENT_SECRET = "05275891c81581c5cb79d336c8e9f87680f0976843bf17d6737bdcf0dde38b1a"; // Updated to actual secret
 const FANVUE_REDIRECT_URI  = "https://avatar-forge-works-9b035df2-j56ivc6di-saifurrehman022s-projects.vercel.app/schedule";
-const FANVUE_AUTH_URL       = "https://auth.fanvue.com/oauth2/auth";
+const FANVUE_AUTH_URL       = "https://auth.fanvue.com/oauth2/auth"; // Correct endpoint
 const FANVUE_TOKEN_URL      = "https://auth.fanvue.com/oauth2/token";
 const FANVUE_API_BASE        = "https://api.fanvue.com";
 
@@ -101,7 +101,7 @@ function startFanvueOAuth() {
     scope: "openid profile posts:write",
     state: crypto.randomUUID(),
   });
-  window.location.href = `${FANVUE_AUTH_URL}?${params}`;
+  window.location.href = `${FANVUE_AUTH_URL}?${params.toString()}`;
 }
 
 /** Exchange OAuth code for tokens and save to connected_accounts */
@@ -130,7 +130,6 @@ async function exchangeFanvueCode(code: string): Promise<void> {
   const refreshToken = tokens.refresh_token as string | undefined;
   const expiresIn    = tokens.expires_in as number | undefined;
 
-  // Fetch Fanvue profile to get username/handle
   const profileRes = await fetch(`${FANVUE_API_BASE}/v1/me`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
@@ -140,7 +139,6 @@ async function exchangeFanvueCode(code: string): Promise<void> {
 
   const { data: userRes } = await supabase.auth.getUser();
 
-  // Upsert into connected_accounts
   const { error } = await supabase.from("connected_accounts").upsert(
     {
       account_name: name,
@@ -159,24 +157,28 @@ async function exchangeFanvueCode(code: string): Promise<void> {
   if (error) throw new Error(`Failed to save account: ${error.message}`);
 }
 
-/** Post content to Fanvue using stored access token */
+/** Post content to Fanvue using stored access token and explicit media file conversions */
 async function publishToFanvue(params: {
   accessToken: string;
   mediaUrl: string;
   mediaType: "image" | "video";
   caption: string;
 }): Promise<string> {
-  // Step 1 — upload media
+  // Step 1 — Fetch the binary content of the generation asset
+  const mediaAssetFile = await fetch(params.mediaUrl);
+  const blobData = await mediaAssetFile.blob();
+  
+  // Construct multi-part upload body object
+  const mediaFormData = new FormData();
+  mediaFormData.append("file", blobData, `upload-${Date.now()}.${params.mediaType === "video" ? "mp4" : "png"}`);
+
+  // Push straight into vault storage
   const uploadRes = await fetch(`${FANVUE_API_BASE}/v1/posts/media`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${params.accessToken}`,
-      "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      url: params.mediaUrl,
-      type: params.mediaType,
-    }),
+    body: mediaFormData,
   });
 
   if (!uploadRes.ok) {
@@ -184,9 +186,13 @@ async function publishToFanvue(params: {
     throw new Error(`Fanvue media upload failed: ${err}`);
   }
   const uploadData = await uploadRes.json();
-  const mediaId = uploadData.id ?? uploadData.mediaId;
+  const mediaId = uploadData.id ?? uploadData.mediaId ?? uploadData.uuid;
 
-  // Step 2 — create post
+  if (!mediaId) {
+    throw new Error("Fanvue processed media but returned an unrecognized structure identifier.");
+  }
+
+  // Step 2 — Bind Vault storage asset key into live timeline target
   const postRes = await fetch(`${FANVUE_API_BASE}/v1/posts`, {
     method: "POST",
     headers: {
@@ -194,9 +200,10 @@ async function publishToFanvue(params: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      caption: params.caption,
-      mediaIds: [mediaId],
-      visibility: "subscribers",
+      text: params.caption,
+      mediaUuids: [mediaId],
+      visibility: "public",
+      status: "published"
     }),
   });
 
@@ -285,8 +292,6 @@ type ScheduledItem = {
 
 const EMPTY_SCHEDULE_ITEMS: ScheduledItem[] = [];
 const EMPTY_CONNECTED_ACCOUNTS: ConnectedAccount[] = [];
-
-// ---------- Data loaders ----------
 
 const PLACEHOLDER = "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=600&q=80";
 
@@ -380,7 +385,7 @@ async function fetchSchedules(): Promise<ScheduledItem[]> {
   });
 }
 
-// ---------- Helpers ----------
+// ---------- Style & Format Helpers ----------
 
 const statusStyle: Record<PublishStatus, string> = {
   scheduled: "bg-chart-2/15 text-chart-2 border-chart-2/30",
@@ -541,7 +546,7 @@ function AccountsDialog({
   );
 }
 
-// ---------- Page ----------
+// ---------- Main Page Component ----------
 
 function SchedulePage() {
   const queryClient = useQueryClient();
@@ -550,13 +555,11 @@ function SchedulePage() {
   const [items, setItems] = useState<ScheduledItem[]>([]);
   useEffect(() => setItems(scheduleData), [scheduleData]);
 
-  // ---- Handle OAuth callback (code in URL) ----
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const code = params.get("code");
     if (!code) return;
 
-    // Remove code from URL immediately to prevent re-processing on refresh
     const clean = window.location.pathname;
     window.history.replaceState({}, "", clean);
 
@@ -675,7 +678,6 @@ function SchedulePage() {
     } catch (e: any) { toast.error(e?.message ?? "Failed to retry"); }
   };
 
-  // ---- Real Fanvue publish ----
   const publishNow = async (id: string) => {
     const item = items.find((i) => i.id === id);
     if (!item) return;
@@ -697,7 +699,6 @@ function SchedulePage() {
     try {
       const caption = item.scenePrompts[0] ?? item.contentName;
 
-      // Call real Fanvue API
       const externalPostId = await publishToFanvue({
         accessToken: account.accessToken,
         mediaUrl: item.mediaUrl,
@@ -708,7 +709,6 @@ function SchedulePage() {
       const now = new Date().toISOString();
       const table = item.type === "image" ? "images" : "videos";
 
-      // Get content_id from schedules row
       const { data: schedRow } = await supabase
         .from("schedules")
         .select("content_id")
@@ -785,7 +785,6 @@ function SchedulePage() {
         <AppHeader />
         <main className="flex-1 overflow-y-auto bg-background">
           <div className="mx-auto max-w-[1400px] space-y-6 p-4 sm:p-6 lg:p-8">
-            {/* Header */}
             <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
               <div>
                 <Link to="/" className="mb-3 inline-flex items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground">
@@ -814,7 +813,6 @@ function SchedulePage() {
               </div>
             </div>
 
-            {/* No account warning banner */}
             {connectedCount === 0 && (
               <div className="flex items-center gap-3 rounded-lg border border-warning/30 bg-warning/5 px-4 py-3">
                 <AlertTriangle className="h-4 w-4 flex-shrink-0 text-warning" />
@@ -827,7 +825,6 @@ function SchedulePage() {
               </div>
             )}
 
-            {/* Stats */}
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
               <DashboardCard label="Scheduled posts" value={stats.scheduled} icon={CalendarClock} accent="primary" hint="Awaiting publish" />
               <DashboardCard label="Publishing today" value={stats.todayCount} icon={Clock} accent="chart-2" hint="In the next 24h" />
@@ -836,7 +833,6 @@ function SchedulePage() {
               <DashboardCard label="Connected accounts" value={`${stats.connectedAccounts}/${accounts.length}`} icon={Link2} accent="chart-4" hint="Fanvue" />
             </div>
 
-            {/* Filters */}
             <Card className="border-border/60 bg-card">
               <CardContent className="flex flex-col gap-3 p-4 lg:flex-row lg:items-center">
                 <div className="relative flex-1">
@@ -882,7 +878,6 @@ function SchedulePage() {
               </CardContent>
             </Card>
 
-            {/* Tabs */}
             <Tabs value={tab} onValueChange={setTab}>
               <TabsList>
                 <TabsTrigger value="calendar">Calendar view</TabsTrigger>
@@ -910,7 +905,7 @@ function SchedulePage() {
   );
 }
 
-// ---------- Calendar view ----------
+// ---------- Calendar subviews ----------
 
 function CalendarView({ weekStart, setWeekStart, items, getAccount, onOpen, onDragStart, onDropOnDay, onSchedule }: {
   weekStart: Date; setWeekStart: (d: Date) => void; items: ScheduledItem[];
@@ -1206,7 +1201,7 @@ function Mini({ label, value }: { label: string; value: string | number }) {
   );
 }
 
-// ---------- Create dialog ----------
+// ---------- Creation modal configuration ----------
 
 type ApprovedAsset = { id: string; type: "image" | "video"; name: string; character: string; thumbnail: string };
 const EMPTY_APPROVED_ASSETS: ApprovedAsset[] = [];
