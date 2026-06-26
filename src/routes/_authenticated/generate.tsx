@@ -212,44 +212,29 @@ async function fileToBase64(file: File): Promise<string> {
 // ---------------------------------------------------------------------------
 const SUPABASE_BUCKET = "videos"; // your bucket name
 
-/**
- * 1. Fetch the file from the RunPod URL as a blob
- * 2. Upload it to Supabase Storage bucket
- * 3. Get the public URL
- * 4. Insert a row in the DB pointing to that public URL
- *
- * Falls back to saving the original RunPod URL directly if the fetch/upload
- * fails (e.g. CORS), so the library entry still gets created.
- */
 async function uploadToBucketAndGetUrl(
   runpodUrl: string,
   storagePath: string,
   mimeType: string
 ): Promise<string> {
   // Step 1 — download the file from RunPod
-  let blob: Blob;
-  try {
-    const resp = await fetch(runpodUrl);
-    if (!resp.ok) throw new Error(`Fetch failed: ${resp.status}`);
-    blob = await resp.blob();
-  } catch (e) {
-    console.warn("Could not fetch from RunPod for re-upload, using original URL:", e);
-    // Return the RunPod URL directly so DB insert still works
-    return runpodUrl;
-  }
+  console.log("[bucket] Fetching from RunPod:", runpodUrl);
+  const resp = await fetch(runpodUrl);
+  if (!resp.ok) throw new Error(`Failed to fetch output from RunPod (${resp.status} ${resp.statusText})`);
+  const blob = await resp.blob();
+  console.log("[bucket] Fetched blob size:", blob.size, "type:", blob.type);
 
   // Step 2 — upload to Supabase Storage
+  console.log("[bucket] Uploading to Supabase bucket:", SUPABASE_BUCKET, "path:", storagePath);
   const { error: uploadError } = await supabase.storage
     .from(SUPABASE_BUCKET)
     .upload(storagePath, blob, { contentType: mimeType, upsert: true });
 
-  if (uploadError) {
-    console.warn("Supabase upload error, using original URL:", uploadError.message);
-    return runpodUrl;
-  }
+  if (uploadError) throw new Error(`Supabase Storage upload failed: ${uploadError.message}`);
 
   // Step 3 — get public URL
   const { data } = supabase.storage.from(SUPABASE_BUCKET).getPublicUrl(storagePath);
+  console.log("[bucket] Public URL:", data.publicUrl);
   return data.publicUrl;
 }
 
@@ -263,10 +248,7 @@ async function saveVideoToLibrary(params: {
 }): Promise<void> {
   const timestamp = Date.now();
   const storagePath = `videos/${timestamp}.mp4`;
-
-  // Upload to bucket (falls back to RunPod URL on failure)
   const publicUrl = await uploadToBucketAndGetUrl(params.videoUrl, storagePath, "video/mp4");
-
   const { error } = await supabase.from("videos").insert({
     video_url: publicUrl,
     prompt: params.prompt,
@@ -283,10 +265,7 @@ async function saveImageToLibrary(params: {
 }): Promise<void> {
   const timestamp = Date.now();
   const storagePath = `images/${timestamp}.jpg`;
-
-  // Upload to bucket (falls back to RunPod URL on failure)
   const publicUrl = await uploadToBucketAndGetUrl(params.imageUrl, storagePath, "image/jpeg");
-
   const { error } = await supabase.from("images").insert({
     image_url: publicUrl,
     prompt: params.prompt,
@@ -438,6 +417,8 @@ function VideoGenerationTab() {
           // Save to library
           const currentScenes = scenesRef.current;
           const firstPrompt = currentScenes[0]?.prompt ?? "Untitled video";
+          let savedToLibrary = false;
+          let saveErrMsg = "";
           try {
             await saveVideoToLibrary({
               videoUrl,
@@ -447,15 +428,25 @@ function VideoGenerationTab() {
               framesPerScene,
               samplingSteps,
             });
+            savedToLibrary = true;
             toast.success("Video ready & saved to library!", {
               action: { label: "View Library", onClick: () => window.location.href = "/library" },
             });
-            setJob((j) => ({ ...j, status: "completed", progress: 100, progressLabel: "Complete!", finalVideoUrl: videoUrl, chunkUrls: out?.chunk_urls ?? [], savedToLibrary: true }));
           } catch (saveErr) {
-            console.error("Library save error:", saveErr);
-            toast.success("Video ready!", { description: "Could not save to library automatically." });
-            setJob((j) => ({ ...j, status: "completed", progress: 100, progressLabel: "Complete!", finalVideoUrl: videoUrl, chunkUrls: out?.chunk_urls ?? [], savedToLibrary: false }));
+            saveErrMsg = saveErr instanceof Error ? saveErr.message : String(saveErr);
+            console.error("[library] Video save failed:", saveErrMsg);
+            toast.error("Could not save to library", { description: saveErrMsg, duration: 8000 });
           }
+          setJob((j) => ({
+            ...j,
+            status: "completed",
+            progress: 100,
+            progressLabel: "Complete!",
+            finalVideoUrl: videoUrl,
+            chunkUrls: out?.chunk_urls ?? [],
+            savedToLibrary,
+            error: saveErrMsg || null,
+          }));
         } else if (data.status === "FAILED") {
           stopPoll(); stopTimer();
           const errMsg = data.error ?? data.output?.error ?? "Job failed on RunPod";
@@ -567,6 +558,7 @@ function VideoGenerationTab() {
             chunkUrls={job.chunkUrls}
             elapsedSec={job.elapsedSec}
             savedToLibrary={job.savedToLibrary}
+            saveError={!job.savedToLibrary ? job.error : null}
             onReset={() => { clearJob(JOB_STORAGE_KEY); setJob(INITIAL_VIDEO_JOB); }}
           />
         )}
@@ -648,20 +640,23 @@ function ImageGenerationTab() {
           }
 
           // Save to library
+          let savedToLibrary = false;
+          let saveErrMsg = "";
           try {
             await saveImageToLibrary({
               imageUrl: imgUrl,
               prompt: submittedPromptRef.current,
             });
+            savedToLibrary = true;
             toast.success("Image ready & saved to library!", {
               action: { label: "View Library", onClick: () => window.location.href = "/library" },
             });
-            setJob((j) => ({ ...j, status: "completed", resultUrl: imgUrl, savedToLibrary: true }));
           } catch (saveErr) {
-            console.error("Library save error:", saveErr);
-            toast.success("Image ready!", { description: "Could not save to library automatically." });
-            setJob((j) => ({ ...j, status: "completed", resultUrl: imgUrl, savedToLibrary: false }));
+            saveErrMsg = saveErr instanceof Error ? saveErr.message : String(saveErr);
+            console.error("[library] Image save failed:", saveErrMsg);
+            toast.error("Could not save to library", { description: saveErrMsg, duration: 8000 });
           }
+          setJob((j) => ({ ...j, status: "completed", resultUrl: imgUrl, savedToLibrary, error: saveErrMsg || null }));
         } else if (data.status === "FAILED") {
           stopPoll(); stopTimer();
           const errMsg = data.error ?? "Image generation failed";
@@ -846,6 +841,7 @@ function ImageGenerationTab() {
             url={job.resultUrl}
             elapsedSec={job.elapsedSec}
             savedToLibrary={job.savedToLibrary}
+            saveError={!job.savedToLibrary ? job.error : null}
             copyUrl={copyUrl}
             onReset={() => { clearJob(IMAGE_JOB_STORAGE_KEY); setJob(INITIAL_IMAGE_JOB); }}
           />
@@ -1098,8 +1094,8 @@ function JobProgressCard({ job, onCancel }: { job: VideoJobState; onCancel: () =
 }
 
 // Dedicated video result card — renders a <video> player
-function VideoResultCard({ url, chunkUrls, elapsedSec, savedToLibrary, onReset }: {
-  url: string; chunkUrls: string[]; elapsedSec: number; savedToLibrary: boolean; onReset: () => void;
+function VideoResultCard({ url, chunkUrls, elapsedSec, savedToLibrary, saveError, onReset }: {
+  url: string; chunkUrls: string[]; elapsedSec: number; savedToLibrary: boolean; saveError?: string | null; onReset: () => void;
 }) {
   const m = Math.floor(elapsedSec / 60); const s = elapsedSec % 60;
   const copyUrl = () => navigator.clipboard.writeText(url).then(() => toast.success("URL copied to clipboard"));
@@ -1130,8 +1126,11 @@ function VideoResultCard({ url, chunkUrls, elapsedSec, savedToLibrary, onReset }
             <a href={url} target="_blank" rel="noopener noreferrer"><ExternalLink className="h-4 w-4" /> Open</a>
           </Button>
         </div>
-        {!savedToLibrary && (
-          <p className="text-[11px] text-warning text-center">⚠ Could not auto-save to library. You can copy the URL above and add it manually.</p>
+        {!savedToLibrary && saveError && (
+          <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 space-y-0.5">
+            <p className="text-[11px] font-medium text-destructive">⚠ Could not save to library</p>
+            <p className="text-[11px] font-mono text-muted-foreground break-all">{saveError}</p>
+          </div>
         )}
         <div className="rounded-lg border border-border bg-muted/20 px-3 py-2">
           <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Video URL</p>
@@ -1159,8 +1158,8 @@ function VideoResultCard({ url, chunkUrls, elapsedSec, savedToLibrary, onReset }
 }
 
 // Dedicated image result card — renders an <img> tag
-function ImageResultCard({ url, elapsedSec, savedToLibrary, copyUrl, onReset }: {
-  url: string; elapsedSec: number; savedToLibrary: boolean; copyUrl: () => void; onReset: () => void;
+function ImageResultCard({ url, elapsedSec, savedToLibrary, saveError, copyUrl, onReset }: {
+  url: string; elapsedSec: number; savedToLibrary: boolean; saveError?: string | null; copyUrl: () => void; onReset: () => void;
 }) {
   const m = Math.floor(elapsedSec / 60); const s = elapsedSec % 60;
   return (
@@ -1190,8 +1189,11 @@ function ImageResultCard({ url, elapsedSec, savedToLibrary, copyUrl, onReset }: 
             <a href={url} target="_blank" rel="noopener noreferrer"><ExternalLink className="h-4 w-4" /> Open</a>
           </Button>
         </div>
-        {!savedToLibrary && (
-          <p className="text-[11px] text-warning text-center">⚠ Could not auto-save to library. You can copy the URL above and add it manually.</p>
+        {!savedToLibrary && saveError && (
+          <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 space-y-0.5">
+            <p className="text-[11px] font-medium text-destructive">⚠ Could not save to library</p>
+            <p className="text-[11px] font-mono text-muted-foreground break-all">{saveError}</p>
+          </div>
         )}
         <div className="flex gap-2">
           <Button variant="ghost" className="flex-1 text-muted-foreground" onClick={onReset}>Generate another image</Button>
