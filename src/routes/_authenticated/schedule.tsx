@@ -46,7 +46,6 @@ import { cn } from "@/lib/utils";
 const SUPABASE_URL = "https://yaiygjwbtzevjpxncvzu.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlhaXlnandidHpldmpweG5jdnp1Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4MTQ2NTA0MiwiZXhwIjoyMDk3MDQxMDQyfQ.ui2Nt6AmAJv8v5XLf2ozumHlBG4BXg7ROIuo80V9UXk";
 
-// Using the service_role key directly ensures zero structural friction with inserts
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
   auth: { persistSession: true }
 });
@@ -145,15 +144,12 @@ async function exchangeFanvueCode(code: string): Promise<void> {
   const refreshToken = tokens.refresh_token as string | undefined;
   const expiresIn    = tokens.expires_in    as number | undefined;
 
-  // Pull profile to isolate correct unique identity parameters
   const profileRes = await fetch(`${FANVUE_API_BASE}/v1/me`, { headers: fanvueHeaders(accessToken) });
   const profile    = profileRes.ok ? await profileRes.json() : {};
 
   const realUuid = profile.id || profile.uuid;
   const handle   = profile.handle || "fanvue-user";
   const name     = profile.displayName || handle;
-
-  console.info("[exchangeFanvueCode] Processing database entry logic against active target table:", { realUuid, handle, name });
 
   const { data: u } = await supabase.auth.getUser();
 
@@ -165,7 +161,7 @@ async function exchangeFanvueCode(code: string): Promise<void> {
     access_token:        accessToken,
     refresh_token:       refreshToken ?? null,
     token_expires_at:    expiresIn ? new Date(Date.now() + expiresIn * 1000).toISOString() : null,
-    created_by:          u.user?.id ?? null,
+    created_by:          u.user?.id || null, 
   };
 
   const { error } = await supabase
@@ -173,7 +169,6 @@ async function exchangeFanvueCode(code: string): Promise<void> {
     .upsert(upsertPayload, { onConflict: "external_account_id" });
 
   if (error) {
-    console.error("[exchangeFanvueCode] Primary unique sync friction detected, running raw insert backup…", error);
     const { error: insertError } = await supabase.from("connected_accounts").insert(upsertPayload);
     if (insertError) throw new Error(`Database entry failure: ${insertError.message}`);
   }
@@ -344,13 +339,13 @@ function DBDiagDialog({ open, onClose }: { open: boolean; onClose: () => void })
       <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>DB Diagnostic — connected_accounts</DialogTitle>
-          <DialogDescription>Direct view of data inside targeted database schema.</DialogDescription>
+          <DialogDescription>Direct view of data inside database schema.</DialogDescription>
         </DialogHeader>
         <ScrollArea className="h-80 rounded-md border border-border bg-black p-3">
           {loading
             ? <p className="text-green-400 font-mono text-xs">Loading target rows…</p>
             : rows.length === 0
-              ? <p className="text-red-400 font-mono text-xs">⚠ THE TABLE IS COMPLETELY EMPTY IN TARGET PROJECT (https://yaiygjwbtzevjpxncvzu.supabase.co)</p>
+              ? <p className="text-red-400 font-mono text-xs">⚠ THE TABLE IS COMPLETELY EMPTY (https://yaiygjwbtzevjpxncvzu.supabase.co)</p>
               : rows.map((r, i) => (
                   <pre key={i} className="whitespace-pre-wrap break-all font-mono text-[10px] text-green-400 border-b border-green-900 pb-2 mb-2">
 {JSON.stringify({
@@ -377,6 +372,36 @@ function DBDiagDialog({ open, onClose }: { open: boolean; onClose: () => void })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Types Declarations
+// ─────────────────────────────────────────────────────────────────────────────
+type PublishStatus = "scheduled" | "publishing" | "published" | "failed";
+type QueueStatus   = "waiting" | "ready" | "publishing" | "published" | "failed";
+type ContentType   = "image" | "video";
+
+type ConnectedAccount = {
+  id: string; platform: "fanvue"; name: string; handle: string;
+  status: "connected" | "disconnected" | "error"; accessToken?: string;
+};
+type HistoryEvent = {
+  at: string; label: string;
+  kind: "approved"|"scheduled"|"queued"|"publishing"|"published"|"failed"|"retried";
+};
+type ScheduledItem = {
+  id: string; contentName: string; type: ContentType; character: string;
+  thumbnail: string; mediaUrl: string; accountId: string;
+  scheduledAt: string; status: PublishStatus; queueStatus: QueueStatus;
+  autoPublish: boolean; externalPostId?: string; publishedAt?: string;
+  settings: { fps: number; framesPerScene: number; numScenes: number; samplingSteps: number };
+  scenePrompts: string[]; negativePrompt: string; history: HistoryEvent[];
+};
+
+type ApprovedAsset = {
+  id: string;
+  type: ContentType;
+  name: string;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Page Routing Definitions
 // ─────────────────────────────────────────────────────────────────────────────
 function RouteErrorBoundary({ error, reset }: { error: Error; reset: () => void }) {
@@ -400,28 +425,7 @@ export const Route = createFileRoute("/_authenticated/schedule")({
 // ─────────────────────────────────────────────────────────────────────────────
 // Data Synchronizations
 // ─────────────────────────────────────────────────────────────────────────────
-type PublishStatus = "scheduled" | "publishing" | "published" | "failed";
-type QueueStatus   = "waiting" | "ready" | "publishing" | "published" | "failed";
-type ContentType   = "image" | "video";
-
-type ConnectedAccount = {
-  id: string; platform: "fanvue"; name: string; handle: string;
-  status: "connected" | "disconnected" | "error"; accessToken?: string;
-};
-type HistoryEvent = {
-  at: string; label: string;
-  kind: "approved"|"scheduled"|"queued"|"publishing"|"published"|"failed"|"retried";
-};
-type ScheduledItem = {
-  id: string; contentName: string; type: ContentType; character: string;
-  thumbnail: string; mediaUrl: string; accountId: string;
-  scheduledAt: string; status: PublishStatus; queueStatus: QueueStatus;
-  autoPublish: boolean; externalPostId?: string; publishedAt?: string;
-  settings: { fps: number; framesPerScene: number; numScenes: number; samplingSteps: number };
-  scenePrompts: string[]; negativePrompt: string; history: HistoryEvent[];
-};
-
-const EMPTY_SCHEDULE_ITEMS:     ScheduledItem[]    = [];
+const EMPTY_SCHEDULE_ITEMS:     ScheduledItem[] = [];
 const EMPTY_CONNECTED_ACCOUNTS: ConnectedAccount[] = [];
 const PLACEHOLDER = "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=600&q=80";
 
@@ -529,13 +533,6 @@ function StatusBadge({ status }: { status: PublishStatus }) {
     </span>
   );
 }
-function QueueBadge({ status }: { status: QueueStatus }) {
-  return (
-    <span className={cn("inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider", queueStatusStyle[status])}>
-      {status}
-    </span>
-  );
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Accounts Settings Dialog Component
@@ -557,7 +554,7 @@ function AccountsDialog({ open, onOpenChange, accounts, onRefresh }: {
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Fanvue Access Integration Profiles</DialogTitle>
-          <DialogDescription>Link your target creator profile instance directly into the schedule engine.</DialogDescription>
+          <DialogDescription>Link your creator profile instance directly into the schedule engine.</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           {accounts.length === 0 ? (
@@ -598,9 +595,9 @@ function AccountsDialog({ open, onOpenChange, accounts, onRefresh }: {
 // ─────────────────────────────────────────────────────────────────────────────
 // Core UI Page Layout Component
 // ─────────────────────────────────────────────────────────────────────────────
-function SchedulePage() {
+export function SchedulePage() {
   const queryClient = useQueryClient();
-  const { data: scheduleData = EMPTY_SCHEDULE_ITEMS } = useQuery({ queryKey: ["schedules"], queryFn: fetchSchedules, staleTime: 5000 });
+  const { data: scheduleData = EMPTY_SCHEDULE_ITEMS, refetch: refetchSchedules } = useQuery({ queryKey: ["schedules"], queryFn: fetchSchedules, staleTime: 5000 });
   const { data: accounts = EMPTY_CONNECTED_ACCOUNTS, refetch: refetchAccounts } = useQuery({ queryKey: ["connected-accounts"], queryFn: fetchAccounts, staleTime: 5000 });
 
   const [items, setItems] = useState<ScheduledItem[]>([]);
@@ -610,7 +607,6 @@ function SchedulePage() {
   const [debugOpen,  setDebugOpen]  = useState(false);
   const [dbDiagOpen, setDbDiagOpen] = useState(false);
 
-  // Parse OAuth Code Handshake Response Loop
   useEffect(() => {
     const p    = new URLSearchParams(window.location.search);
     const code = p.get("code");
@@ -619,13 +615,14 @@ function SchedulePage() {
     toast.loading("Parsing connected token records across schema…", { id: "oauth" });
     exchangeFanvueCode(code)
       .then(() => {
-        toast.success("Profile integrated successfully into target table instance!", { id: "oauth" });
+        toast.success("Profile integrated successfully into database!", { id: "oauth" });
         refetchAccounts();
+        refetchSchedules();
         queryClient.invalidateQueries({ queryKey: ["connected-accounts"] });
         queryClient.invalidateQueries({ queryKey: ["schedules"] });
       })
       .catch((e) => toast.error(e.message ?? "Authorization error", { id: "oauth" }));
-  }, [refetchAccounts, queryClient]);
+  }, [refetchAccounts, refetchSchedules, queryClient]);
 
   const [tab,           setTab]           = useState("calendar");
   const [search,        setSearch]        = useState("");
@@ -756,10 +753,6 @@ function SchedulePage() {
     }
   };
 
-  const onDropOnDay = async (day: Date) => {
-    // Basic calendar drag re-scheduling wrapper stub
-  };
-
   return (
     <SidebarProvider>
       <AppSidebar />
@@ -812,21 +805,21 @@ function SchedulePage() {
                 <TabsTrigger value="history">Historical Outputs Archive</TabsTrigger>
               </TabsList>
               <TabsContent value="calendar" className="mt-4">
-                <CalendarView weekStart={weekStart} setWeekStart={setWeekStart} items={filteredItems} getAccount={getAccount} onOpen={setSelected} onDragStart={() => {}} onDropOnDay={onDropOnDay} onSchedule={() => setCreateOpen(true)} />
+                <CalendarView weekStart={weekStart} setWeekStart={setWeekStart} items={filteredItems} getAccount={getAccount} onOpen={setSelected} onSchedule={() => setCreateOpen(true)} />
               </TabsContent>
               <TabsContent value="queue" className="mt-4">
-                <QueueView items={filteredItems.filter((i) => ["scheduled","publishing","failed"].includes(i.status))} getAccount={getAccount} onOpen={setSelected} onCancel={removeItem} onPublishNow={publishNow} onRetry={retryPublish} onSchedule={() => setCreateOpen(true)} />
+                <QueueView items={filteredItems.filter((i) => ["scheduled","publishing","failed"].includes(i.status))} getAccount={getAccount} onOpen={setSelected} onCancel={removeItem} onPublishNow={publishNow} onSchedule={() => setCreateOpen(true)} />
               </TabsContent>
               <TabsContent value="history" className="mt-4">
-                <HistoryView items={filteredItems.filter((i) => ["published","failed"].includes(i.status))} getAccount={getAccount} onOpen={setSelected} onRetry={retryPublish} />
+                <HistoryView items={filteredItems.filter((i) => ["published","failed"].includes(i.status))} getAccount={getAccount} onOpen={setSelected} />
               </TabsContent>
             </Tabs>
           </div>
         </main>
       </SidebarInset>
 
-      <DetailSheet item={selected} onClose={() => setSelected(null)} getAccount={getAccount} onRetry={retryPublish} onPublishNow={publishNow} onRemove={removeItem} />
-      <CreateScheduleDialog open={createOpen} onOpenChange={setCreateOpen} accounts={accounts} />
+      <DetailSheet item={selected} onClose={() => setSelected(null)} getAccount={getAccount} onPublishNow={publishNow} />
+      <CreateScheduleDialog open={createOpen} onOpenChange={setCreateOpen} />
       <AccountsDialog open={accountsOpen} onOpenChange={setAccountsOpen} accounts={accounts} onRefresh={() => { refetchAccounts(); }} />
       <DebugLogDialog open={debugOpen} onClose={() => setDebugOpen(false)} log={debugLog} />
       <DBDiagDialog open={dbDiagOpen} onClose={() => setDbDiagOpen(false)} />
@@ -862,7 +855,7 @@ function CalendarView({ weekStart, setWeekStart, items, onOpen, onSchedule }: an
 // ─────────────────────────────────────────────────────────────────────────────
 // Queue sub-components
 // ─────────────────────────────────────────────────────────────────────────────
-function QueueView({ items, onOpen, onPublishNow, onCancel }: any) {
+function QueueView({ items, onPublishNow, onCancel }: any) {
   if (items.length === 0) return <div className="text-center p-8 text-xs text-muted-foreground">Queue schema matches zero remaining records.</div>;
   return (
     <div className="space-y-2">
@@ -887,7 +880,7 @@ function QueueView({ items, onOpen, onPublishNow, onCancel }: any) {
 // ─────────────────────────────────────────────────────────────────────────────
 // History sub-components
 // ─────────────────────────────────────────────────────────────────────────────
-function HistoryView({ items, onOpen }: any) {
+function HistoryView({ items }: any) {
   if (items.length === 0) return <div className="text-center p-8 text-xs text-muted-foreground">No processing execution actions have finalized outputs yet.</div>;
   return (
     <div className="space-y-2">
@@ -929,9 +922,20 @@ function DetailSheet({ item, onClose, onPublishNow }: any) {
             <div className="aspect-video bg-muted rounded overflow-hidden">
               <img src={item.thumbnail} alt="preview" className="object-cover w-full h-full" />
             </div>
-            <Field label="System schedule timestamp" value={fmtDateTime(item.scheduledAt)} />
-            <Field label="Presigned asset url location" value={item.mediaUrl || "No asset source file present"} />
-            {item.externalPostId && <Field label="Fanvue API post reference uuid" value={item.externalPostId} />}
+            <div className="space-y-1">
+              <Label className="text-xs text-muted-foreground">System schedule timestamp</Label>
+              <p className="text-sm font-medium">{fmtDateTime(item.scheduledAt)}</p>
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs text-muted-foreground">Presigned asset url location</Label>
+              <p className="text-sm font-medium break-all">{item.mediaUrl || "No asset source file present"}</p>
+            </div>
+            {item.externalPostId && (
+              <div className="space-y-1">
+                <Label className="text-xs text-muted-foreground">Fanvue API post reference uuid</Label>
+                <p className="text-sm font-mono bg-muted p-1.5 rounded">{item.externalPostId}</p>
+              </div>
+            )}
             <Button className="w-full" onClick={() => onPublishNow(item.id)}>Force execution sync now</Button>
           </div>
         )}
@@ -945,7 +949,7 @@ function DetailSheet({ item, onClose, onPublishNow }: any) {
 // ─────────────────────────────────────────────────────────────────────────────
 function CreateScheduleDialog({ open, onOpenChange }: any) {
   const queryClient = useQueryClient();
-  const [assets, setAssets] = useState<any[]>([]);
+  const [assets, setAssets] = useState<ApprovedAsset[]>([]);
   const [idx, setIdx]       = useState("0");
   const [date, setDate]     = useState(() => new Date().toISOString().slice(0,10));
   const [time, setTime]     = useState("12:00");
