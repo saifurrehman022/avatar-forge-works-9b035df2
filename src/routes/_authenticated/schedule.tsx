@@ -59,7 +59,7 @@ const FANVUE_CLIENT_SECRET = "05275891c81581c5cb79d336c8e9f87680f0976843bf17d673
 // FIXED: Dynamically map origin to support seamless branch and preview redirects safely
 const FANVUE_REDIRECT_URI  = typeof window !== "undefined"
   ? `${window.location.origin}/schedule`
-  : "https://avatar-forge-works-9b035df2-7wivxcegc-saifurrehman022s-projects.vercel.app/schedule";
+  : "https://avatar-forge-works-9b035df2-olive.vercel.app/schedule";
 
 const FANVUE_AUTH_URL      = "https://auth.fanvue.com/oauth2/auth";
 const FANVUE_TOKEN_URL     = "https://auth.fanvue.com/oauth2/token";
