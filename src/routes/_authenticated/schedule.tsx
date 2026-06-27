@@ -1,5 +1,3 @@
-
-
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -60,7 +58,13 @@ const fanvueHeaders = (token: string, extra?: Record<string, string>) => ({
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Debug logger — collects a full trace and shows it in the UI on failure
+// Helper: detect fake/legacy post IDs (not real Fanvue UUIDs)
+// ─────────────────────────────────────────────────────────────────────────────
+const isRealFanvueUUID = (id: string | undefined) =>
+  !!id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Debug logger
 // ─────────────────────────────────────────────────────────────────────────────
 class PublishLogger {
   lines: string[] = [];
@@ -149,7 +153,7 @@ async function exchangeFanvueCode(code: string): Promise<void> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Fanvue publish pipeline  — every step throws on failure, NO silent fallbacks
+// Fanvue publish pipeline
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function fetchMediaBlob(url: string, log: PublishLogger): Promise<Blob> {
@@ -309,7 +313,7 @@ async function publishToFanvue(params: {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Debug log dialog — shows the full publish trace when something goes wrong
+// Debug log dialog
 // ─────────────────────────────────────────────────────────────────────────────
 function DebugLogDialog({ open, onClose, log }: { open: boolean; onClose: () => void; log: string }) {
   return (
@@ -424,16 +428,27 @@ async function fetchSchedules(): Promise<ScheduledItem[]> {
     const media    = isVideo ? src?.video_url : src?.image_url;
     const thumb    = char?.reference_image_url || media || PLACEHOLDER;
 
+    // FIX 1: Determine real publish status
+    // If external_post_id is a fake legacy ID (not a real UUID), treat the item
+    // as "scheduled" so the Publish Now button is shown again.
+    const rawStatus = r.status ?? src?.publish_status ?? "scheduled";
+    const fakeId    = src?.external_post_id && !isRealFanvueUUID(src?.external_post_id);
     const status: PublishStatus =
-      r.status === "published" ? "published" : r.status === "failed" ? "failed"
-      : r.status === "publishing" ? "publishing" : "scheduled";
+      rawStatus === "published" && fakeId ? "scheduled"   // ← force re-publish for fake IDs
+      : rawStatus === "published"         ? "published"
+      : rawStatus === "failed"            ? "failed"
+      : rawStatus === "publishing"        ? "publishing"
+      : "scheduled";
+
     const queueStatus: QueueStatus =
-      status === "published" ? "published" : status === "failed" ? "failed"
+      status === "published"  ? "published"
+      : status === "failed"   ? "failed"
       : status === "publishing" ? "publishing"
       : new Date(r.publish_time) <= new Date() ? "ready" : "waiting";
 
-    // accountId: schedule row first (most reliable), then asset row
-    const accountId = r.connected_account_id ?? src?.connected_account_id ?? "";
+    // FIX 2: accountId priority — schedule row first, then asset row
+    // The schedule row's connected_account_id is the most up-to-date (set at schedule creation)
+    const accountId = (r.connected_account_id ?? src?.connected_account_id ?? "").toString();
 
     return {
       id: r.id,
@@ -441,13 +456,16 @@ async function fetchSchedules(): Promise<ScheduledItem[]> {
       type: r.content_type, character: char?.name ?? "Lila",
       thumbnail: thumb, mediaUrl: media || "", accountId,
       scheduledAt: r.publish_time, status, queueStatus, autoPublish: true,
-      externalPostId: src?.external_post_id ?? undefined,
-      publishedAt:    src?.published_at      ?? undefined,
+      // FIX 3: only surface externalPostId if it's a real UUID
+      externalPostId: isRealFanvueUUID(src?.external_post_id) ? src.external_post_id : undefined,
+      publishedAt:    src?.published_at ?? undefined,
       settings: { fps: 16, framesPerScene: 257, numScenes: scenes.length || 1, samplingSteps: 29 },
       scenePrompts: scenes, negativePrompt: "low quality, blurry, distorted face, watermark",
       history: [
         { at: r.created_at, label: `Scheduled for ${new Date(r.publish_time).toLocaleString()}`, kind: "scheduled" },
-        ...(src?.published_at ? [{ at: src.published_at, label: "Published", kind: "published" as const }] : []),
+        ...(src?.published_at && isRealFanvueUUID(src?.external_post_id)
+          ? [{ at: src.published_at, label: "Published", kind: "published" as const }]
+          : []),
       ],
     };
   });
@@ -652,27 +670,46 @@ function SchedulePage() {
     catch (e: any) { toast.error(e?.message ?? "Failed"); }
   };
 
+  // FIX 4: publishNow — robust account resolution with clear diagnostics
   const publishNow = async (id: string) => {
     const item = items.find((i) => i.id === id);
     if (!item) return;
 
-    // ── Resolve account ─────────────────────────────────────────────────────
-    let account = accounts.find((a) => a.id === item.accountId && a.status === "connected" && !!a.accessToken);
-    if (!account) account = accounts.find((a) => a.status === "connected" && !!a.accessToken);
+    // Step A: try to find the account linked to this specific item
+    let account = item.accountId
+      ? accounts.find((a) => a.id === item.accountId && a.status === "connected" && !!a.accessToken)
+      : undefined;
+
+    // Step B: if not found, fall back to ANY connected account
     if (!account) {
-      toast.error("No connected Fanvue account found.", { action: { label: "Connect", onClick: () => setAccountsOpen(true) } });
+      account = accounts.find((a) => a.status === "connected" && !!a.accessToken);
+      if (account) {
+        // FIX 5: update the schedule row so it's properly linked going forward
+        await supabase.from("schedules").update({ connected_account_id: account.id }).eq("id", id);
+        updateItem(id, { accountId: account.id });
+        toast.info(`Using account @${account.handle} (auto-selected)`);
+      }
+    }
+
+    if (!account) {
+      toast.error("No connected Fanvue account found. Please connect one first.", {
+        action: { label: "Connect account", onClick: () => setAccountsOpen(true) },
+      });
       return;
     }
 
-    // ── Validate media URL ───────────────────────────────────────────────────
+    // FIX 6: validate media URL before starting
     if (!item.mediaUrl) {
-      toast.error("No media URL on this item. The image/video may not have finished generating.");
+      toast.error(
+        "No media URL found on this item. The image/video may still be generating, or the URL was never saved.",
+        { duration: 8000 }
+      );
       return;
     }
 
     updateItem(id, { status: "publishing", queueStatus: "publishing" });
     const toastId = `pub-${id}`;
-    toast.loading("Starting publish…", { id: toastId });
+    toast.loading(`Uploading to Fanvue via @${account.handle}…`, { id: toastId });
 
     let publishLog = "";
     try {
@@ -687,7 +724,7 @@ function SchedulePage() {
       });
       publishLog = log;
 
-      // ── Save back to Supabase ──────────────────────────────────────────────
+      // Save back to Supabase
       const now   = new Date().toISOString();
       const table = item.type === "image" ? "images" : "videos";
       const { data: schedRow } = await supabase.from("schedules").select("content_id").eq("id", id).single();
@@ -847,6 +884,7 @@ function SchedulePage() {
                   onSchedule={() => setCreateOpen(true)} />
               </TabsContent>
               <TabsContent value="queue" className="mt-4">
+                {/* FIX 7: Queue now also shows items with fake IDs (re-publish needed) */}
                 <QueueView
                   items={filteredItems.filter((i) => ["scheduled","publishing","failed"].includes(i.status))}
                   getAccount={getAccount} onOpen={setSelected}
@@ -966,12 +1004,17 @@ function QueueView({ items, getAccount, onOpen, onCancel, onPublishNow, onRetry,
                   <p className="truncate text-sm font-semibold">{i.contentName}</p>
                   <QueueBadge status={i.queueStatus} />
                 </div>
+                {/* FIX 8: Show account info or helpful message */}
                 <p className="mt-0.5 text-xs text-muted-foreground">
                   {i.character} ·{" "}
-                  {account ? `@${account.handle}` : <span className="text-warning text-xs">No account linked — will auto-pick first connected</span>}
+                  {account
+                    ? <span className="text-foreground">@{account.handle}</span>
+                    : <span className="text-amber-500">No account linked — will auto-pick first connected account</span>}
                 </p>
                 <p className="mt-0.5 text-[11px] text-muted-foreground font-mono break-all">
-                  mediaUrl: {i.mediaUrl ? i.mediaUrl.slice(0, 60) + "…" : <span className="text-destructive">MISSING</span>}
+                  {i.mediaUrl
+                    ? <span className="text-muted-foreground">media: {i.mediaUrl.slice(0, 60)}…</span>
+                    : <span className="text-destructive font-semibold">⚠ Media URL missing — image may still be generating</span>}
                 </p>
                 <p className="mt-1 inline-flex items-center gap-1 text-xs text-muted-foreground">
                   <Clock className="h-3 w-3" />{fmtDateTime(i.scheduledAt)}
@@ -981,7 +1024,7 @@ function QueueView({ items, getAccount, onOpen, onCancel, onPublishNow, onRetry,
                 {i.status === "failed" ? (
                   <Button size="sm" variant="outline" className="gap-1.5" onClick={() => onRetry(i.id)}><RefreshCw className="h-3.5 w-3.5" /> Retry</Button>
                 ) : (
-                  <Button size="sm" variant="outline" className="gap-1.5" onClick={() => onPublishNow(i.id)} disabled={i.status === "publishing"}>
+                  <Button size="sm" variant="outline" className="gap-1.5" onClick={() => onPublishNow(i.id)} disabled={i.status === "publishing" || !i.mediaUrl}>
                     {i.status === "publishing" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
                     {i.status === "publishing" ? "Publishing…" : "Publish now"}
                   </Button>
@@ -1074,6 +1117,10 @@ function DetailSheet({ item, onClose, getAccount, onRetry, onPublishNow, onRemov
   onRetry: (id: string) => void; onPublishNow: (id: string) => void; onRemove: (id: string) => void;
 }) {
   const account = item ? getAccount(item.accountId) : undefined;
+
+  // FIX 9: show Publish Now if not truly published (i.e. no real Fanvue UUID yet)
+  const canPublish = item && item.status !== "publishing" && item.status !== "published";
+
   return (
     <Sheet open={!!item} onOpenChange={(o) => !o && onClose()}>
       <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
@@ -1091,7 +1138,7 @@ function DetailSheet({ item, onClose, getAccount, onRetry, onPublishNow, onRemov
 
             {/* Media URL debug info */}
             <div className="rounded-md border border-border bg-background/40 p-3">
-              <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground mb-1">Media URL (must be non-empty)</p>
+              <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground mb-1">Media URL</p>
               {item.mediaUrl
                 ? <p className="font-mono text-[11px] break-all text-foreground">{item.mediaUrl}</p>
                 : <p className="text-destructive text-xs font-semibold">⚠️ MISSING — image/video URL is empty. The asset did not finish generating.</p>}
@@ -1099,7 +1146,7 @@ function DetailSheet({ item, onClose, getAccount, onRetry, onPublishNow, onRemov
 
             <div className="grid grid-cols-2 gap-3">
               <Field label="Scheduled"         value={fmtDateTime(item.scheduledAt)} />
-              <Field label="Connected account" value={account ? `${account.name} (@${account.handle})` : "Not linked — will auto-pick"} />
+              <Field label="Connected account" value={account ? `${account.name} (@${account.handle})` : "Not linked — will auto-pick first connected"} />
               {item.publishedAt && <Field label="Published at" value={fmtDateTime(item.publishedAt)} />}
             </div>
 
@@ -1107,16 +1154,10 @@ function DetailSheet({ item, onClose, getAccount, onRetry, onPublishNow, onRemov
               <div className="rounded-md border border-border bg-background/40 p-3">
                 <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Fanvue Post UUID</p>
                 <p className="mt-1 font-mono text-xs break-all text-foreground">{item.externalPostId}</p>
-                {/* Only show link if it looks like a real Fanvue UUID (has dashes), not a fake fv_timestamp */}
-                {item.externalPostId.match(/^[0-9a-f-]{36}$/) && (
-                  <a href={`https://www.fanvue.com/post/${item.externalPostId}`} target="_blank" rel="noopener noreferrer"
-                    className="mt-2 inline-flex items-center gap-1.5 text-xs text-primary hover:underline">
-                    <ExternalLink className="h-3 w-3" /> View on Fanvue
-                  </a>
-                )}
-                {!item.externalPostId.match(/^[0-9a-f-]{36}$/) && (
-                  <p className="mt-1 text-[11px] text-destructive">⚠️ This is a fake ID from a previous broken publish. Retry to get a real UUID.</p>
-                )}
+                <a href={`https://www.fanvue.com/post/${item.externalPostId}`} target="_blank" rel="noopener noreferrer"
+                  className="mt-2 inline-flex items-center gap-1.5 text-xs text-primary hover:underline">
+                  <ExternalLink className="h-3 w-3" /> View on Fanvue
+                </a>
               </div>
             )}
 
@@ -1144,14 +1185,18 @@ function DetailSheet({ item, onClose, getAccount, onRetry, onPublishNow, onRemov
 
             <Separator />
             <div className="flex flex-wrap items-center gap-2">
-              {item.status === "failed"
-                ? <Button size="sm" className="gap-2" onClick={() => onRetry(item.id)}><RefreshCw className="h-4 w-4" /> Retry</Button>
-                : item.status !== "published"
-                  ? <Button size="sm" className="gap-2" onClick={() => onPublishNow(item.id)} disabled={item.status === "publishing"}>
-                      {item.status === "publishing" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-                      {item.status === "publishing" ? "Publishing…" : "Publish now"}
-                    </Button>
-                  : null}
+              {/* FIX 9: Show publish button for all non-truly-published items */}
+              {canPublish && (
+                <Button size="sm" className="gap-2" onClick={() => onPublishNow(item.id)} disabled={!item.mediaUrl}>
+                  {item.status === "publishing" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                  {item.status === "publishing" ? "Publishing…" : item.status === "failed" ? "Retry publish" : "Publish now"}
+                </Button>
+              )}
+              {item.status === "published" && (
+                <Button size="sm" variant="outline" className="gap-2" onClick={() => onPublishNow(item.id)}>
+                  <RefreshCw className="h-4 w-4" /> Re-publish
+                </Button>
+              )}
               <Button size="sm" variant="outline" className="gap-2 text-destructive hover:text-destructive" onClick={() => onRemove(item.id)}>
                 <Trash2 className="h-4 w-4" /> Remove
               </Button>
@@ -1224,7 +1269,7 @@ function CreateScheduleDialog({ open, onOpenChange, accounts }: {
       const { error: schedErr } = await supabase.from("schedules").insert({
         content_type: asset.type, content_id: asset.id,
         publish_time: iso, platform: "Fanvue", status: "scheduled",
-        connected_account_id: accountId,   // ← save here so publishNow can find it
+        connected_account_id: accountId,
         created_by: u.user?.id ?? null,
       });
       if (schedErr) throw schedErr;
