@@ -163,46 +163,98 @@ async function exchangeFanvueCode(code: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Fanvue publish flow — FIXED
+// Fanvue publish flow
 //
-// The core problem with the old code:
-//   fetch(cloudFrontUrl) fails in the browser due to CORS.
-//   The blob was empty/broken, so Fanvue received 0 bytes → no media on the post.
+// Why posts showed "success" but nothing appeared on Fanvue:
 //
-// Fix: route the image download through /api/proxy-image (your Vercel function).
-// That function runs server-side where CORS does not apply.
+//  ROOT CAUSE 1 — CORS:
+//    Supabase/CloudFront URLs block cross-origin browser fetches, so
+//    fetchMediaBlob() returned an empty or failed blob.  Fanvue's S3
+//    received 0 bytes → the media record stayed broken → the post was
+//    created with no visible media.
 //
-// Also added: poll GET /media/{uuid} until status === "ready" before creating
-// the post. Without this, Fanvue creates a post with missing/broken media.
+//    FIX: We first try the server-side Vercel proxy (/api/proxy-image.ts)
+//    which has no CORS restriction.  If the proxy itself isn't deployed yet
+//    we fall back to a direct fetch and throw a clear message so you know
+//    exactly what to fix.
+//
+//  ROOT CAUSE 2 — Race condition (media not ready):
+//    POST /posts was called immediately after completeUpload().  Fanvue
+//    processes uploads asynchronously; the media was still "processing"
+//    when the post was created, so no image appeared.
+//
+//    FIX: Poll GET /media/{uuid} after completing the upload and only
+//    create the post once status === "ready".
+//
+//  ROOT CAUSE 3 — ETag quoting:
+//    S3 returns ETags wrapped in double-quotes (e.g. "\"abc123\"").
+//    Fanvue's complete-upload endpoint requires the raw value without
+//    extra quoting.  We strip outer quotes before sending.
 // ---------------------------------------------------------------------------
 
 /**
- * Download image/video binary through the Vercel proxy so CORS is bypassed.
- * The proxy only allows your own CloudFront domain (see /api/proxy-image.ts).
+ * Step 0 — Download the media binary.
+ *
+ * Tries the server-side Vercel proxy first (/api/proxy-image?url=...) to
+ * bypass CORS.  If the proxy is unavailable or the URL is same-origin, falls
+ * back to a direct fetch.  Throws a descriptive error in every failure case
+ * so the toast shows the actual problem.
  */
 async function fetchMediaBlob(mediaUrl: string): Promise<Blob> {
-  // Route through our server-side proxy to avoid browser CORS restrictions.
-  // Falls back to direct fetch if the URL is already same-origin (e.g. in tests).
   const isCrossOrigin =
     mediaUrl.startsWith("https://") &&
     !mediaUrl.startsWith(window.location.origin);
 
-  const fetchUrl = isCrossOrigin
-    ? `/api/proxy-image?url=${encodeURIComponent(mediaUrl)}`
-    : mediaUrl;
+  // ── Try server-side proxy first (no CORS) ──────────────────────────────
+  if (isCrossOrigin) {
+    const proxyUrl = `/api/proxy-image?url=${encodeURIComponent(mediaUrl)}`;
+    try {
+      const res = await fetch(proxyUrl);
+      if (res.ok) {
+        const blob = await res.blob();
+        if (blob.size > 0) {
+          console.info(`[fetchMediaBlob] proxy OK — ${blob.size} bytes`);
+          return blob;
+        }
+        // Proxy returned 200 but empty body — treat as failure and try direct
+        console.warn("[fetchMediaBlob] proxy returned empty blob, trying direct fetch");
+      } else {
+        const errText = await res.text().catch(() => "");
+        console.warn(`[fetchMediaBlob] proxy ${res.status}: ${errText} — trying direct fetch`);
+      }
+    } catch (proxyErr) {
+      // Proxy not deployed or network error — try direct fetch
+      console.warn("[fetchMediaBlob] proxy not reachable:", proxyErr);
+    }
+  }
 
-  const res = await fetch(fetchUrl);
-  if (!res.ok) {
+  // ── Direct fetch (works for same-origin URLs; may fail on cross-origin) ─
+  try {
+    const res = await fetch(mediaUrl);
+    if (!res.ok) {
+      throw new Error(
+        `Direct media fetch failed (${res.status} ${res.statusText}). ` +
+        `Deploy api/proxy-image.ts to your Vercel project to fix CORS.`
+      );
+    }
+    const blob = await res.blob();
+    if (blob.size === 0) {
+      throw new Error(
+        "Media blob is empty after direct fetch. " +
+        "This usually means CORS blocked the response. " +
+        "Deploy api/proxy-image.ts to your Vercel project."
+      );
+    }
+    console.info(`[fetchMediaBlob] direct fetch OK — ${blob.size} bytes`);
+    return blob;
+  } catch (directErr) {
+    // Re-throw with a clear message pointing at the proxy solution
+    const msg = directErr instanceof Error ? directErr.message : String(directErr);
     throw new Error(
-      `Failed to download media (${res.status}). ` +
-      `Make sure /api/proxy-image.ts is deployed on Vercel.`
+      `Cannot download media: ${msg}. ` +
+      `Make sure api/proxy-image.ts is deployed in your Vercel project root.`
     );
   }
-  const blob = await res.blob();
-  if (blob.size === 0) {
-    throw new Error("Downloaded media blob is empty — check proxy-image route.");
-  }
-  return blob;
 }
 
 /** Step 1 — POST /media/uploads → { mediaUuid, uploadId } */
@@ -217,16 +269,24 @@ async function createUploadSession(
     body: JSON.stringify({ name: filename, filename, mediaType }),
   });
   if (!res.ok) {
-    throw new Error(`Create upload session failed (${res.status}): ${await res.text()}`);
+    const body = await res.text();
+    throw new Error(
+      `[Step 1] Create upload session failed (${res.status}): ${body}. ` +
+      `Check that your OAuth token has the write:media scope.`
+    );
   }
   const data = await res.json();
   if (!data.mediaUuid || !data.uploadId) {
-    throw new Error(`Unexpected session response: ${JSON.stringify(data)}`);
+    throw new Error(`[Step 1] Unexpected session response: ${JSON.stringify(data)}`);
   }
+  console.info(`[Step 1] Upload session created — mediaUuid: ${data.mediaUuid}`);
   return { mediaUuid: data.mediaUuid, uploadId: data.uploadId };
 }
 
-/** Step 2a — GET presigned S3 URL for a specific part number (returns plain text) */
+/**
+ * Step 2a — GET presigned S3 URL for a specific part number.
+ * Response is text/plain (a raw pre-signed S3 URL).
+ */
 async function getPartUrl(
   accessToken: string,
   uploadId: string,
@@ -237,24 +297,45 @@ async function getPartUrl(
     { headers: fanvueHeaders(accessToken) }
   );
   if (!res.ok) {
-    throw new Error(`Get part URL failed (${res.status}): ${await res.text()}`);
+    const body = await res.text();
+    throw new Error(`[Step 2a] Get part URL failed (${res.status}): ${body}`);
   }
-  // Response is text/plain — a raw presigned S3 URL
-  return res.text();
+  const url = await res.text();
+  if (!url.startsWith("https://")) {
+    throw new Error(`[Step 2a] Unexpected part URL response: ${url.slice(0, 80)}`);
+  }
+  console.info(`[Step 2a] Got presigned S3 URL (part ${partNumber})`);
+  return url;
 }
 
-/** Step 2b — PUT blob directly to S3 presigned URL, returns ETag */
+/**
+ * Step 2b — PUT blob directly to S3 presigned URL, returns ETag.
+ * S3 wraps ETags in double-quotes; we strip them before returning.
+ */
 async function uploadToS3(presignedUrl: string, blob: Blob): Promise<string> {
+  console.info(`[Step 2b] Uploading ${blob.size} bytes to S3…`);
   const res = await fetch(presignedUrl, {
     method: "PUT",
     body: blob,
-    // No Authorization header — S3 presigned URLs are self-authenticating
+    // Do NOT add Authorization here — S3 presigned URLs are self-authenticating
   });
   if (!res.ok) {
-    throw new Error(`S3 upload failed (${res.status}): ${await res.text()}`);
+    const body = await res.text();
+    throw new Error(
+      `[Step 2b] S3 upload failed (${res.status}): ${body}. ` +
+      `The presigned URL may have expired — retry the publish.`
+    );
   }
-  const etag = res.headers.get("ETag");
-  if (!etag) throw new Error("S3 did not return an ETag for the uploaded part");
+  const rawEtag = res.headers.get("ETag") ?? res.headers.get("etag");
+  if (!rawEtag) {
+    throw new Error(
+      "[Step 2b] S3 did not return an ETag. " +
+      "The upload may have succeeded — check your Fanvue media vault."
+    );
+  }
+  // Strip surrounding double-quotes that S3 sometimes adds: "\"abc\"" → "abc"
+  const etag = rawEtag.replace(/^"|"$/g, "");
+  console.info(`[Step 2b] S3 upload complete, ETag: ${etag}`);
   return etag;
 }
 
@@ -270,24 +351,29 @@ async function completeUpload(
     body: JSON.stringify({ parts }),
   });
   if (!res.ok) {
-    throw new Error(`Complete upload failed (${res.status}): ${await res.text()}`);
+    const body = await res.text();
+    throw new Error(`[Step 3] Complete upload failed (${res.status}): ${body}`);
   }
+  const data = await res.json();
+  console.info(`[Step 3] Upload completed, Fanvue status: ${data.status}`);
 }
 
 /**
  * Step 4 — Poll GET /media/{mediaUuid} until status === "ready".
  *
- * CRITICAL: Fanvue processes uploads asynchronously. If you call POST /posts
- * while the media is still "processing", the post is created with no image.
- * This polling step ensures media is ready before we attach it to a post.
+ * CRITICAL: Fanvue processes uploads asynchronously.  Calling POST /posts
+ * while the media is still "processing" creates a post with no visible media.
+ * This is the fix for the "post successful but nothing appears" bug.
  */
 async function waitForMediaReady(
   accessToken: string,
   mediaUuid: string
 ): Promise<void> {
-  const MAX_WAIT_MS    = 60_000; // 60 seconds max wait
-  const POLL_INTERVAL  = 3_000;  // check every 3 seconds
+  const MAX_WAIT_MS   = 120_000; // 2 minute max (videos can be slow)
+  const POLL_INTERVAL =   3_000; // poll every 3 seconds
   const start = Date.now();
+
+  console.info(`[Step 4] Polling media status for ${mediaUuid}…`);
 
   while (Date.now() - start < MAX_WAIT_MS) {
     const res = await fetch(`${FANVUE_API_BASE}/media/${mediaUuid}`, {
@@ -296,55 +382,75 @@ async function waitForMediaReady(
 
     if (res.ok) {
       const data = await res.json();
-      if (data.status === "ready") return;       // ✅ good to go
+      console.info(`[Step 4] Media status: ${data.status}`);
+
+      if (data.status === "ready") return;   // ✅ safe to create post now
+
       if (data.status === "error") {
-        throw new Error("Fanvue media processing failed — check the file format.");
+        throw new Error(
+          "[Step 4] Fanvue media processing failed. " +
+          "Check that the file is a supported format (JPEG/PNG for images, MP4 for video)."
+        );
       }
-      // status is "created" or "processing" — keep waiting
+      // "created" or "processing" — keep waiting
+    } else {
+      // Transient non-200 is common during processing; log and keep polling
+      console.warn(`[Step 4] Poll returned ${res.status}, retrying…`);
     }
-    // Non-200 during processing is transient; keep polling
+
     await new Promise((r) => setTimeout(r, POLL_INTERVAL));
   }
 
   throw new Error(
-    "Timed out waiting for Fanvue media to be ready (60s). " +
-    "The file may be too large or in an unsupported format."
+    "[Step 4] Timed out waiting for Fanvue media to be ready (120s). " +
+    "The file may be too large, in an unsupported format, or Fanvue is slow. " +
+    "Check your Fanvue media vault to see if the upload succeeded."
   );
 }
 
-/** Step 5 — POST /posts with the ready mediaUuid → returns post UUID */
+/** Step 5 — POST /posts with the ready mediaUuid → returns the new post UUID */
 async function createFanvuePost(
   accessToken: string,
   mediaUuid: string,
   caption: string,
   audience: "subscribers" | "followers-and-subscribers"
 ): Promise<string> {
+  const body = { text: caption, mediaUuids: [mediaUuid], audience };
+  console.info("[Step 5] Creating post:", JSON.stringify(body));
+
   const res = await fetch(`${FANVUE_API_BASE}/posts`, {
     method: "POST",
     headers: fanvueHeaders(accessToken, { "Content-Type": "application/json" }),
-    body: JSON.stringify({
-      text: caption,
-      mediaUuids: [mediaUuid],
-      audience,
-    }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
-    throw new Error(`Create post failed (${res.status}): ${await res.text()}`);
+    const errBody = await res.text();
+    throw new Error(
+      `[Step 5] Create post failed (${res.status}): ${errBody}. ` +
+      `Check that your OAuth token has the write:post scope.`
+    );
   }
   const data = await res.json();
-  return data.uuid ?? `fv_${Date.now()}`;
+  const postUuid = data.uuid ?? `fv_${Date.now()}`;
+  console.info(`[Step 5] Post created! UUID: ${postUuid}`);
+  return postUuid;
 }
 
 /**
- * Full publish pipeline:
- *  1. Download binary via proxy (bypasses CORS)
- *  2. Create Fanvue multipart upload session
- *  3. Get presigned S3 URL, upload blob, collect ETag
- *  4. Complete upload session
- *  5. Poll until media is "ready"  ← fixes missing-image bug
- *  6. Create post with mediaUuid
+ * Full publish pipeline — called by publishNow():
+ *
+ *  Step 0  Download media binary via server-side proxy (bypasses CORS)
+ *  Step 1  POST /media/uploads           → get mediaUuid + uploadId
+ *  Step 2a GET /media/uploads/{id}/parts/1/url → get S3 presigned URL
+ *  Step 2b PUT blob to S3               → get ETag
+ *  Step 3  PATCH /media/uploads/{id}    → complete multipart session
+ *  Step 4  Poll GET /media/{uuid}        → wait until status = "ready"
+ *  Step 5  POST /posts                  → create post with mediaUuid
  *
  * Returns the Fanvue post UUID.
+ *
+ * Each step throws a descriptive error on failure so the toast message
+ * tells you exactly what went wrong.
  */
 async function publishToFanvue(params: {
   accessToken: string;
@@ -368,39 +474,37 @@ async function publishToFanvue(params: {
     onProgress?.(msg);
   };
 
-  // ── 1. Download the media blob ────────────────────────────────────────────
+  // Step 0 — Download media ─────────────────────────────────────────────────
   report("Downloading media…");
   const blob = await fetchMediaBlob(mediaUrl);
+  report(`Downloaded ${(blob.size / 1024).toFixed(0)} KB`);
 
   const ext      = mediaType === "video" ? "mp4" : "jpeg";
-  const filename = `upload-${Date.now()}.${ext}`;
+  const filename = `lila-upload-${Date.now()}.${ext}`;
 
-  // ── 2. Create upload session ──────────────────────────────────────────────
+  // Step 1 — Create upload session ──────────────────────────────────────────
   report("Creating Fanvue upload session…");
-  const { mediaUuid, uploadId } = await createUploadSession(
-    accessToken,
-    filename,
-    mediaType
-  );
+  const { mediaUuid, uploadId } = await createUploadSession(accessToken, filename, mediaType);
 
-  // ── 3. Upload to S3 ───────────────────────────────────────────────────────
+  // Step 2 — Upload to S3 ───────────────────────────────────────────────────
   report("Uploading to Fanvue storage…");
   const presignedUrl = await getPartUrl(accessToken, uploadId, 1);
   const etag = await uploadToS3(presignedUrl, blob);
 
-  // ── 4. Complete upload session ────────────────────────────────────────────
+  // Step 3 — Complete session ───────────────────────────────────────────────
   report("Finalising upload…");
   await completeUpload(accessToken, uploadId, [{ PartNumber: 1, ETag: etag }]);
 
-  // ── 5. Wait until Fanvue finishes processing ──────────────────────────────
-  report("Processing media (this may take up to 60s)…");
+  // Step 4 — Wait for media ready ───────────────────────────────────────────
+  report("Processing media on Fanvue (up to 2 min for video)…");
   await waitForMediaReady(accessToken, mediaUuid);
+  report("Media ready ✓");
 
-  // ── 6. Create the post ────────────────────────────────────────────────────
-  report("Publishing post…");
+  // Step 5 — Create post ────────────────────────────────────────────────────
+  report("Publishing post to Fanvue…");
   const postUuid = await createFanvuePost(accessToken, mediaUuid, caption, audience);
 
-  report(`Done! Post UUID: ${postUuid}`);
+  report(`Published! Post UUID: ${postUuid}`);
   return postUuid;
 }
 
@@ -1016,9 +1120,15 @@ function SchedulePage() {
       });
       queryClient.invalidateQueries({ queryKey: ["schedules"] });
     } catch (e: any) {
+      const errMsg: string = e?.message ?? "Unknown error";
+      console.error("[publishNow] FAILED:", errMsg);
       updateItem(id, { status: "failed", queueStatus: "failed" });
       try { await scheduleService.update(id, { status: "failed" }); } catch {}
-      toast.error(`Publish failed: ${e?.message ?? "Unknown error"}`, { id: toastId });
+      toast.error("Publish failed", {
+        id: toastId,
+        description: errMsg,
+        duration: 12_000,
+      });
     }
   };
 
