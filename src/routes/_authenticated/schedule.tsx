@@ -242,55 +242,61 @@ async function createUploadSession(
 
 /** Step 2a — GET presigned S3 URL for upload part.
  *
- * IMPORTANT: The non-agency endpoint /media/uploads/{id}/parts/{n}/url
- * does NOT exist for regular OAuth users — it returns 404.
- * The working endpoint is the agency one:
- *   GET /creators/{creatorUserUuid}/media/uploads/{uploadId}/parts/{n}/url
- * We get the creator's own UUID from GET /me first.
- * Requires scopes: write:creator + write:media
+ * Tries the non-agency endpoint first (write:media scope only).
+ * Falls back to the agency/creator-scoped endpoint (write:creator scope).
+ * Both return a presigned S3 URL as plain text.
  */
 async function getPartUrl(
   accessToken: string,
   uploadId: string,
   partNumber: number
 ): Promise<string> {
-  // Get the authenticated user's own UUID
+  // ── Attempt 1: non-agency endpoint (write:media only) ───────────────────
+  const nonAgencyUrl = `${FANVUE_API_BASE}/media/uploads/${uploadId}/parts/${partNumber}/url`;
+  console.info(`[getPartUrl] Attempt 1 (non-agency): GET ${nonAgencyUrl}`);
+  const res1  = await fetch(nonAgencyUrl, { headers: fanvueHeaders(accessToken) });
+  const text1 = (await res1.text()).trim();
+  console.info(`[getPartUrl] Attempt 1 → ${res1.status}: "${text1.slice(0, 120)}"`);
+  if (res1.ok && text1.startsWith("https://")) {
+    console.info("[getPartUrl] ✅ non-agency endpoint worked");
+    return text1;
+  }
+
+  // ── Attempt 2: creator-scoped agency endpoint (write:creator scope) ──────
+  console.info("[getPartUrl] Attempt 1 failed — trying creator-scoped endpoint…");
   console.info("[getPartUrl] fetching /me to get creator UUID…");
-  const meRes = await fetch(`${FANVUE_API_BASE}/me`, {
-    headers: fanvueHeaders(accessToken),
-  });
+  const meRes = await fetch(`${FANVUE_API_BASE}/me`, { headers: fanvueHeaders(accessToken) });
   if (!meRes.ok) {
-    const meText = await meRes.text();
     throw new Error(
-      `GET /me failed (${meRes.status}): ${meText}. ` +
-      `Check your OAuth token has read:self scope.`
+      `GET /me failed (${meRes.status}). ` +
+      `Non-agency presigned URL also failed (${res1.status}): ${text1.slice(0,200)}`
     );
   }
   const me = await meRes.json() as { uuid?: string; id?: string };
   const creatorUuid = me.uuid ?? me.id;
-  if (!creatorUuid) {
-    throw new Error(`GET /me returned no uuid/id field: ${JSON.stringify(me)}`);
-  }
+  if (!creatorUuid) throw new Error(`GET /me returned no uuid: ${JSON.stringify(me)}`);
   console.info(`[getPartUrl] creator UUID: ${creatorUuid}`);
 
-  // Use the creator-scoped endpoint (works for both agency and self-managed)
-  const url = `${FANVUE_API_BASE}/creators/${creatorUuid}/media/uploads/${uploadId}/parts/${partNumber}/url`;
-  console.info(`[getPartUrl] GET ${url}`);
-  const res  = await fetch(url, { headers: fanvueHeaders(accessToken) });
-  const text = (await res.text()).trim();
-  console.info(`[getPartUrl] → ${res.status}: "${text.slice(0, 80)}"`);
+  const agencyUrl = `${FANVUE_API_BASE}/creators/${creatorUuid}/media/uploads/${uploadId}/parts/${partNumber}/url`;
+  console.info(`[getPartUrl] Attempt 2 (agency): GET ${agencyUrl}`);
+  const res2  = await fetch(agencyUrl, { headers: fanvueHeaders(accessToken) });
+  const text2 = (await res2.text()).trim();
+  console.info(`[getPartUrl] Attempt 2 → ${res2.status}: "${text2.slice(0, 120)}"`);
 
-  if (!res.ok) {
+  if (!res2.ok) {
     throw new Error(
-      `Get part URL failed (${res.status}): ${text}. ` +
-      `Make sure your Fanvue app has write:creator + write:media scopes enabled ` +
-      `in the Fanvue developer dashboard, then reconnect your account.`
+      `Both presigned URL endpoints failed.\n` +
+      `Non-agency (${res1.status}): ${text1.slice(0,150)}\n` +
+      `Agency (${res2.status}): ${text2.slice(0,150)}\n` +
+      `If agency returned 403, go to your Fanvue app → Scopes → enable write:creator, ` +
+      `then DISCONNECT and RECONNECT your account.`
     );
   }
-  if (!text.startsWith("https://")) {
-    throw new Error(`Part URL response is not a URL: "${text.slice(0, 200)}"`);
+  if (!text2.startsWith("https://")) {
+    throw new Error(`Agency endpoint response is not a URL: "${text2.slice(0,200)}"`);
   }
-  return text;
+  console.info("[getPartUrl] ✅ agency endpoint worked");
+  return text2;
 }
 
 /** Step 2b — PUT blob directly to S3 presigned URL, returns ETag */
@@ -415,7 +421,7 @@ async function createFanvuePost(
   catch { throw new Error(`POST /posts returned non-JSON: ${text.slice(0, 300)}`); }
 
   // Fanvue docs confirm the response is { uuid: string, ... }
-  const postUuid = data.uuid ?? null;
+  const postUuid = data.uuid ?? data.id ?? data.postUuid ?? data.post?.uuid ?? null;
   console.info("[createFanvuePost] Full response:", JSON.stringify(data));
 
   if (!postUuid) {
@@ -437,6 +443,24 @@ async function createFanvuePost(
  *
  * Returns the Fanvue post UUID.
  */
+// ─────────────────────────────────────────────────────────────────────────────
+// Direct URL → Fanvue upload
+//
+// Flow:
+//  Step 1  Fetch blob from your Supabase/CloudFront URL (public, no CORS issue)
+//  Step 2  POST /media/uploads                  → get mediaUuid + uploadId
+//  Step 3a GET presigned S3 URL (try both non-agency and agency endpoints)
+//  Step 3b PUT blob to S3                       → get ETag
+//  Step 4  PATCH /media/uploads/{id}            → complete multipart session
+//  Step 5  Poll GET /media/{uuid}               → wait until status=ready
+//  Step 6  POST /posts with mediaUuid           → get real post UUID
+//
+// Your URLs:
+//   Images: https://d2p7pge43lyniu.cloudfront.net/output/...jpeg
+//   Videos: https://yaiygjwbtzevjpxncvzu.supabase.co/storage/v1/object/public/videos/...mp4
+//
+// Both are public URLs — the blob fetch works directly without CORS issues.
+// ─────────────────────────────────────────────────────────────────────────────
 async function publishToFanvue(params: {
   accessToken: string;
   mediaUrl: string;
@@ -459,39 +483,44 @@ async function publishToFanvue(params: {
     onProgress?.(msg);
   };
 
-  // ── 1. Download the media blob ────────────────────────────────────────────
-  report("Downloading media…");
+  report(`Starting: ${mediaType} from ${mediaUrl.slice(0, 60)}…`);
+
+  // ── Step 1: Download blob from your URL ───────────────────────────────────
+  // Your Supabase videos bucket is public and CloudFront is open — no CORS issues.
+  report("Step 1/6: Downloading media from URL…");
   const blob = await fetchMediaBlob(mediaUrl);
+  report(`Step 1/6 ✓ Downloaded ${(blob.size / 1024).toFixed(0)} KB`);
 
   const ext      = mediaType === "video" ? "mp4" : "jpeg";
-  const filename = `upload-${Date.now()}.${ext}`;
+  const filename = `lila-${Date.now()}.${ext}`;
 
-  // ── 2. Create upload session ──────────────────────────────────────────────
-  report("Creating Fanvue upload session…");
-  const { mediaUuid, uploadId } = await createUploadSession(
-    accessToken,
-    filename,
-    mediaType
-  );
+  // ── Step 2: Create Fanvue upload session ──────────────────────────────────
+  report("Step 2/6: Creating Fanvue upload session…");
+  const { mediaUuid, uploadId } = await createUploadSession(accessToken, filename, mediaType);
+  report(`Step 2/6 ✓ mediaUuid=${mediaUuid}`);
 
-  // ── 3. Upload to S3 ───────────────────────────────────────────────────────
-  report("Uploading to Fanvue storage…");
+  // ── Step 3: Get presigned S3 URL and upload ───────────────────────────────
+  report("Step 3/6: Getting S3 presigned URL…");
   const presignedUrl = await getPartUrl(accessToken, uploadId, 1);
+  report("Step 3/6: Uploading to S3…");
   const etag = await uploadToS3(presignedUrl, blob);
+  report(`Step 3/6 ✓ ETag=${etag}`);
 
-  // ── 4. Complete upload session ────────────────────────────────────────────
-  report("Finalising upload…");
+  // ── Step 4: Complete the multipart session ────────────────────────────────
+  report("Step 4/6: Completing upload…");
   await completeUpload(accessToken, uploadId, [{ PartNumber: 1, ETag: etag }]);
+  report("Step 4/6 ✓");
 
-  // ── 5. Wait until Fanvue finishes processing ──────────────────────────────
-  report("Processing media (this may take up to 60s)…");
+  // ── Step 5: Wait for Fanvue to process the media ─────────────────────────
+  report("Step 5/6: Waiting for Fanvue to process media (up to 2 min)…");
   await waitForMediaReady(accessToken, mediaUuid, onProgress);
+  report("Step 5/6 ✓ Media ready");
 
-  // ── 6. Create the post ────────────────────────────────────────────────────
-  report("Publishing post…");
+  // ── Step 6: Create the post ───────────────────────────────────────────────
+  report("Step 6/6: Creating Fanvue post…");
   const postUuid = await createFanvuePost(accessToken, mediaUuid, caption, audience);
+  report(`Step 6/6 ✓ Published! Post UUID: ${postUuid}`);
 
-  report(`Done! Post UUID: ${postUuid}`);
   return postUuid;
 }
 
