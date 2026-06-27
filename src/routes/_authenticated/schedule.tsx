@@ -382,11 +382,13 @@ async function waitForMediaReady(
 
     if (res.ok) {
       const data = await res.json();
-      console.info(`[Step 4] Media status: ${data.status}`);
+      console.info("[Step 4] Media poll response:", JSON.stringify(data));
 
-      if (data.status === "ready") return;   // ✅ safe to create post now
+      // Fanvue uses lowercase status values per docs: created, processing, ready, error
+      const status = (data.status ?? "").toLowerCase();
+      if (status === "ready" || status === "finalised" || status === "finalized") return;   // ✅ safe to create post now
 
-      if (data.status === "error") {
+      if (status === "error") {
         throw new Error(
           "[Step 4] Fanvue media processing failed. " +
           "Check that the file is a supported format (JPEG/PNG for images, MP4 for video)."
@@ -431,9 +433,31 @@ async function createFanvuePost(
     );
   }
   const data = await res.json();
-  const postUuid = data.uuid ?? `fv_${Date.now()}`;
+  // Log the FULL response so we can see exactly what Fanvue returns
+  console.info("[Step 5] Full Fanvue POST /posts response:", JSON.stringify(data));
+
+  // Fanvue returns { uuid: "..." } per their docs — try every possible field
+  const postUuid =
+    data.uuid ??
+    data.id ??
+    data.postUuid ??
+    data.post_uuid ??
+    data.post?.uuid ??
+    data.post?.id ??
+    null;
+
+  if (!postUuid) {
+    // Post was created but we couldn't parse the ID — log and return a marker
+    console.error("[Step 5] Could not find post UUID in response:", JSON.stringify(data));
+    throw new Error(
+      `[Step 5] Post was created on Fanvue but the response had no UUID field. ` +
+      `Full response: ${JSON.stringify(data).slice(0, 300)}. ` +
+      `Check browser console for the full response.`
+    );
+  }
+
   console.info(`[Step 5] Post created! UUID: ${postUuid}`);
-  return postUuid;
+  return postUuid as string;
 }
 
 /**
