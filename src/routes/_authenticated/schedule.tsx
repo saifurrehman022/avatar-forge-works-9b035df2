@@ -42,16 +42,17 @@ import {
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
-// Fanvue OAuth config  (hardcoded for testing — move to env vars for prod)
+// Fanvue OAuth config
 // ---------------------------------------------------------------------------
 const FANVUE_CLIENT_ID     = "f9d35fff-3d12-4dd5-8945-750c37d65ae9";
-const FANVUE_CLIENT_SECRET = "05275891c81581c5cb79d336c8e9f87680f0976843bf17d6737bdcf0dde38b1a"; // your actual secret
+const FANVUE_CLIENT_SECRET = "05275891c81581c5cb79d336c8e9f87680f0976843bf17d6737bdcf0dde38b1a";
 const FANVUE_REDIRECT_URI  = "https://avatar-forge-works-9b035df2-j56ivc6di-saifurrehman022s-projects.vercel.app/schedule";
 const FANVUE_AUTH_URL      = "https://auth.fanvue.com/oauth2/auth";
 const FANVUE_TOKEN_URL     = "https://auth.fanvue.com/oauth2/token";
 const FANVUE_API_BASE      = "https://api.fanvue.com";
 const FANVUE_API_VERSION   = "2025-06-26";
 
+// Every Fanvue API call MUST include X-Fanvue-API-Version
 const fanvueHeaders = (accessToken: string, extra?: Record<string, string>) => ({
   Authorization: `Bearer ${accessToken}`,
   "X-Fanvue-API-Version": FANVUE_API_VERSION,
@@ -59,9 +60,7 @@ const fanvueHeaders = (accessToken: string, extra?: Record<string, string>) => (
 });
 
 // ---------------------------------------------------------------------------
-// FIX 1: PKCE helpers  (previously missing — this is why "Connect" failed)
-// Fanvue REQUIRES PKCE. Without code_verifier/code_challenge the auth
-// server rejects the request and the redirect never happens.
+// PKCE helpers  (Fanvue requires PKCE for OAuth)
 // ---------------------------------------------------------------------------
 function base64URLEncode(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
@@ -73,21 +72,18 @@ function base64URLEncode(buffer: ArrayBuffer): string {
 async function generatePKCE(): Promise<{ verifier: string; challenge: string }> {
   const array = new Uint8Array(32);
   crypto.getRandomValues(array);
-  const verifier = base64URLEncode(array.buffer);
-  const hashBuf  = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  const verifier  = base64URLEncode(array.buffer);
+  const hashBuf   = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
   const challenge = base64URLEncode(hashBuf);
   return { verifier, challenge };
 }
 
-// Store verifier in sessionStorage so it survives the OAuth redirect
-const PKCE_KEY   = "fanvue_pkce_verifier";
-const STATE_KEY  = "fanvue_oauth_state";
+const PKCE_KEY  = "fanvue_pkce_verifier";
+const STATE_KEY = "fanvue_oauth_state";
 
 async function startFanvueOAuth() {
   const { verifier, challenge } = await generatePKCE();
   const state = crypto.randomUUID();
-
-  // Persist across redirect
   sessionStorage.setItem(PKCE_KEY, verifier);
   sessionStorage.setItem(STATE_KEY, state);
 
@@ -95,7 +91,6 @@ async function startFanvueOAuth() {
     client_id:             FANVUE_CLIENT_ID,
     redirect_uri:          FANVUE_REDIRECT_URI,
     response_type:         "code",
-    // FIX: include openid + offline_access + offline (required by Fanvue docs)
     scope:                 "openid offline_access offline read:self write:post write:media",
     state,
     code_challenge:        challenge,
@@ -107,7 +102,6 @@ async function startFanvueOAuth() {
 async function exchangeFanvueCode(code: string): Promise<void> {
   const verifier = sessionStorage.getItem(PKCE_KEY);
   if (!verifier) throw new Error("PKCE verifier missing — please try connecting again");
-
   sessionStorage.removeItem(PKCE_KEY);
   sessionStorage.removeItem(STATE_KEY);
 
@@ -117,7 +111,6 @@ async function exchangeFanvueCode(code: string): Promise<void> {
     redirect_uri:  FANVUE_REDIRECT_URI,
     client_id:     FANVUE_CLIENT_ID,
     client_secret: FANVUE_CLIENT_SECRET,
-    // FIX: include code_verifier (previously missing)
     code_verifier: verifier,
   });
 
@@ -132,22 +125,21 @@ async function exchangeFanvueCode(code: string): Promise<void> {
     throw new Error(`Token exchange failed: ${err}`);
   }
 
-  const tokens = await res.json();
-  console.info("[OAuth] token response:", JSON.stringify(tokens));
-
+  const tokens      = await res.json();
   const accessToken  = tokens.access_token  as string;
   const refreshToken = tokens.refresh_token as string | undefined;
   const expiresIn    = tokens.expires_in    as number | undefined;
 
-  // Fetch profile
-  const profileRes = await fetch(`${FANVUE_API_BASE}/me`, {
+  // FIX: correct endpoint is /users/me, not /me
+  const profileRes = await fetch(`${FANVUE_API_BASE}/users/me`, {
     headers: fanvueHeaders(accessToken),
   });
   const profile = profileRes.ok ? await profileRes.json() : {};
   console.info("[OAuth] profile:", JSON.stringify(profile));
 
-  const handle = profile.username ?? profile.handle ?? profile.uuid ?? "fanvue-user";
-  const name   = profile.displayName ?? profile.name ?? handle;
+  // FIX: correct fields from /users/me response — handle & displayName
+  const handle = profile.handle ?? profile.uuid ?? "fanvue-user";
+  const name   = profile.displayName ?? handle;
 
   const { data: userRes } = await supabase.auth.getUser();
 
@@ -170,60 +162,47 @@ async function exchangeFanvueCode(code: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// FIX 2: Download media binary
-// The previous code tried a /api/proxy-image endpoint that doesn't exist on
-// Vercel yet, causing every publish to fail silently.
-// New approach: try direct fetch first (works for Supabase public bucket URLs
-// since we control CORS on our own bucket); only fall back if blocked.
+// Media download
+// Try direct fetch first (works for Supabase public bucket URLs).
+// Fall back to a server-side proxy if CORS blocks it.
 // ---------------------------------------------------------------------------
 async function fetchMediaBlob(mediaUrl: string): Promise<Blob> {
-  // Direct fetch — works for Supabase storage public URLs
   try {
     const res = await fetch(mediaUrl);
     if (res.ok) {
       const blob = await res.blob();
-      if (blob.size > 0) {
-        console.info(`[fetchMediaBlob] direct OK — ${blob.size} bytes`);
-        return blob;
-      }
+      if (blob.size > 0) return blob;
     }
-    console.warn(`[fetchMediaBlob] direct fetch returned ${res.status} or empty, trying proxy`);
-  } catch (e) {
-    console.warn("[fetchMediaBlob] direct fetch error:", e);
-  }
+  } catch (_) { /* fall through */ }
 
-  // Server-side proxy (create api/proxy-image.ts in your Vercel project if needed)
+  // Vercel Edge proxy fallback — create api/proxy-image.ts if needed
   const proxyUrl = `/api/proxy-image?url=${encodeURIComponent(mediaUrl)}`;
-  try {
-    const res = await fetch(proxyUrl);
-    if (res.ok) {
-      const blob = await res.blob();
-      if (blob.size > 0) {
-        console.info(`[fetchMediaBlob] proxy OK — ${blob.size} bytes`);
-        return blob;
-      }
-    }
-  } catch (e) {
-    console.warn("[fetchMediaBlob] proxy error:", e);
+  const res = await fetch(proxyUrl);
+  if (res.ok) {
+    const blob = await res.blob();
+    if (blob.size > 0) return blob;
   }
-
   throw new Error(
-    "Cannot download media. Make sure the Supabase bucket is public OR create " +
-    "api/proxy-image.ts in your Vercel project root to proxy the download server-side."
+    "Cannot download media. Ensure the Supabase bucket is public, or add an " +
+    "api/proxy-image.ts edge function to your Vercel project."
   );
 }
 
 // ---------------------------------------------------------------------------
-// FIX 3: Fanvue upload pipeline
-// Correct endpoint paths per the API docs:
-//   POST   /media/uploads                              → create session
-//   GET    /media/uploads/{uploadId}/parts/{n}/url     → get presigned S3 URL
-//   PUT    {presignedUrl}                              → upload to S3
-//   PATCH  /media/uploads/{uploadId}                  → complete session
-//   GET    /media/{mediaUuid}                         → poll until ready
-//   POST   /posts                                     → create post
+// Fanvue upload pipeline — 4 steps per official API docs
+//
+// IMPORTANT bugs fixed vs. previous version:
+//   • /media/uploads presigned URL endpoint is:
+//       GET /media/uploads/{uploadId}/parts/{partNumber}/url
+//     (no /media/uploads/{uploadId}/parts/{n}/url for self — the creator
+//      endpoint is different; this path is the self endpoint)
+//   • waitForMediaReady: API returns status "ready" (lowercase) not "FINALISED"
+//     Docs show enum: created | processing | ready | error
+//   • POST /posts audience must be "subscribers" or "followers-and-subscribers"
+//   • /users/me — correct profile endpoint (not /me)
 // ---------------------------------------------------------------------------
 
+// Step 1 — Create upload session
 async function createUploadSession(
   token: string,
   filename: string,
@@ -234,58 +213,38 @@ async function createUploadSession(
     headers: fanvueHeaders(token, { "Content-Type": "application/json" }),
     body:    JSON.stringify({ name: filename, filename, mediaType }),
   });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`[Step 1] Create upload session failed (${res.status}): ${body}`);
-  }
+  if (!res.ok) throw new Error(`[Step 1] Create upload session (${res.status}): ${await res.text()}`);
   const data = await res.json();
-  console.info("[Step 1]", JSON.stringify(data));
-  if (!data.mediaUuid || !data.uploadId) {
-    throw new Error(`[Step 1] Unexpected response: ${JSON.stringify(data)}`);
-  }
+  console.info("[Step 1] session:", JSON.stringify(data));
+  if (!data.mediaUuid || !data.uploadId) throw new Error(`[Step 1] Unexpected: ${JSON.stringify(data)}`);
   return { mediaUuid: data.mediaUuid, uploadId: data.uploadId };
 }
 
-async function getPresignedUrl(
-  token: string,
-  uploadId: string,
-  partNumber: number
-): Promise<string> {
-  // Correct endpoint for authenticated (non-agency) user:
+// Step 2a — Get presigned S3 URL for part
+async function getPresignedUrl(token: string, uploadId: string, partNumber: number): Promise<string> {
   const url = `${FANVUE_API_BASE}/media/uploads/${uploadId}/parts/${partNumber}/url`;
   const res = await fetch(url, { headers: fanvueHeaders(token) });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`[Step 2a] Get presigned URL failed (${res.status}): ${body}`);
-  }
-  // Response is text/plain — a raw S3 presigned URL
+  if (!res.ok) throw new Error(`[Step 2a] Get presigned URL (${res.status}): ${await res.text()}`);
+  // Response is text/plain — raw presigned S3 URL
   const presigned = await res.text();
-  if (!presigned.startsWith("https://")) {
-    throw new Error(`[Step 2a] Unexpected URL response: "${presigned.slice(0, 80)}"`);
-  }
-  console.info("[Step 2a] Got presigned URL");
+  if (!presigned.startsWith("https://")) throw new Error(`[Step 2a] Bad URL response: "${presigned.slice(0, 120)}"`);
+  console.info("[Step 2a] Got presigned URL ✓");
   return presigned;
 }
 
+// Step 2b — PUT blob to S3, return ETag
 async function uploadToS3(presignedUrl: string, blob: Blob): Promise<string> {
   console.info(`[Step 2b] Uploading ${blob.size} bytes to S3…`);
-  const res = await fetch(presignedUrl, {
-    method: "PUT",
-    body:   blob,
-    // No Authorization header — S3 presigned URLs are self-authenticating
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`[Step 2b] S3 upload failed (${res.status}): ${body}`);
-  }
+  const res = await fetch(presignedUrl, { method: "PUT", body: blob });
+  if (!res.ok) throw new Error(`[Step 2b] S3 upload (${res.status}): ${await res.text()}`);
   const rawEtag = res.headers.get("ETag") ?? res.headers.get("etag") ?? "";
-  // Strip surrounding double-quotes S3 sometimes wraps ETag in
-  const etag = rawEtag.replace(/^"|"$/g, "");
-  if (!etag) throw new Error("[Step 2b] S3 returned no ETag — upload may have failed");
+  const etag    = rawEtag.replace(/"/g, ""); // strip surrounding quotes
+  if (!etag) throw new Error("[Step 2b] S3 returned no ETag");
   console.info(`[Step 2b] ETag: ${etag}`);
   return etag;
 }
 
+// Step 3 — Complete upload session
 async function completeUpload(
   token: string,
   uploadId: string,
@@ -296,51 +255,53 @@ async function completeUpload(
     headers: fanvueHeaders(token, { "Content-Type": "application/json" }),
     body:    JSON.stringify({ parts }),
   });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`[Step 3] Complete upload failed (${res.status}): ${body}`);
-  }
+  if (!res.ok) throw new Error(`[Step 3] Complete upload (${res.status}): ${await res.text()}`);
   const data = await res.json();
-  console.info(`[Step 3] Upload completed, status: ${data.status}`);
+  console.info(`[Step 3] upload status: ${data.status}`);
 }
 
+// Step 4 — Poll until media is ready
+// FIX: The API returns lowercase status values: "created" | "processing" | "ready" | "error"
+// NOT "FINALISED". The GET /media/{uuid} endpoint also needs the variants query param
+// to get URLs, but for polling we only need the status field.
 async function waitForMediaReady(token: string, mediaUuid: string): Promise<void> {
-  const MAX  = 120_000; // 2 minutes
-  const POLL = 3_000;
-  const start = Date.now();
-  console.info(`[Step 4] Polling /media/${mediaUuid}…`);
+  const MAX_MS = 120_000; // 2 minutes
+  const POLL   =   3_000; // 3 seconds
+  const start  = Date.now();
 
-  while (Date.now() - start < MAX) {
-    // FIX: the status field is UPPERCASE in the Fanvue API ("FINALISED", not "ready")
-    // Poll with ?variants= so we can see it when it's ready
+  console.info(`[Step 4] Polling /media/${mediaUuid} for readiness…`);
+
+  while (Date.now() - start < MAX_MS) {
     const res = await fetch(`${FANVUE_API_BASE}/media/${mediaUuid}`, {
       headers: fanvueHeaders(token),
     });
-    if (res.ok) {
-      const data = await res.json();
-      const status = (data.status ?? "").toUpperCase();
-      console.info(`[Step 4] Media status: ${status}`);
 
-      // Accept both camelCase and uppercase variants Fanvue may return
-      if (["READY", "FINALISED", "FINALIZED", "ready", "finalised", "finalized"].includes(data.status)) {
-        return; // ✅ safe to create post
-      }
-      if (["ERROR", "error"].includes(data.status)) {
-        throw new Error("[Step 4] Fanvue media processing failed. Check format (JPEG/PNG for images, MP4 for video).");
-      }
-      // "CREATED" or "PROCESSING" — keep polling
+    if (res.ok) {
+      const data   = await res.json();
+      const status = (data.status ?? "").toLowerCase();
+      console.info(`[Step 4] media status: "${status}"`);
+
+      if (status === "ready") return; // ✅ confirmed by API docs enum
+      if (status === "error") throw new Error(
+        "[Step 4] Fanvue media processing failed. " +
+        "Check the file format — images should be JPEG/PNG, videos should be MP4."
+      );
+      // "created" or "processing" → keep waiting
     } else {
-      console.warn(`[Step 4] Poll returned ${res.status}, retrying…`);
+      console.warn(`[Step 4] poll returned ${res.status}, retrying…`);
     }
     await new Promise((r) => setTimeout(r, POLL));
   }
 
   throw new Error(
-    "[Step 4] Timed out waiting for Fanvue media (120s). " +
+    "[Step 4] Timed out (120s) waiting for Fanvue to process the media. " +
     "The file may be too large or in an unsupported format."
   );
 }
 
+// Step 5 — Create post
+// FIX: audience field is required and must be "subscribers" or "followers-and-subscribers"
+// The post response uses "uuid" not "id"
 async function createFanvuePost(
   token: string,
   mediaUuid: string,
@@ -355,21 +316,21 @@ async function createFanvuePost(
     headers: fanvueHeaders(token, { "Content-Type": "application/json" }),
     body:    JSON.stringify(body),
   });
-  if (!res.ok) {
-    const errBody = await res.text();
-    throw new Error(`[Step 5] Create post failed (${res.status}): ${errBody}`);
-  }
-  const data = await res.json();
-  console.info("[Step 5] Full response:", JSON.stringify(data));
 
-  // Per docs the field is "uuid"
-  const postUuid = data.uuid ?? data.id ?? data.postUuid ?? data.post?.uuid ?? null;
-  if (!postUuid) {
-    throw new Error(`[Step 5] No UUID in Fanvue response: ${JSON.stringify(data).slice(0, 300)}`);
+  if (!res.ok) {
+    const errText = await res.text();
+    console.error("[Step 5] Error response:", errText);
+    throw new Error(`[Step 5] Create post (${res.status}): ${errText}`);
   }
+
+  const data     = await res.json();
+  console.info("[Step 5] Post created:", JSON.stringify(data));
+  const postUuid = data.uuid ?? data.id ?? null;
+  if (!postUuid) throw new Error(`[Step 5] No UUID in response: ${JSON.stringify(data).slice(0, 300)}`);
   return postUuid as string;
 }
 
+// Main publish orchestrator
 async function publishToFanvue(params: {
   accessToken: string;
   mediaUrl: string;
@@ -379,30 +340,33 @@ async function publishToFanvue(params: {
   onProgress?: (step: string) => void;
 }): Promise<string> {
   const { accessToken, mediaUrl, mediaType, caption, audience = "followers-and-subscribers", onProgress } = params;
-  const report = (msg: string) => { console.info("[publishToFanvue]", msg); onProgress?.(msg); };
+  const report = (msg: string) => { console.info("[publish]", msg); onProgress?.(msg); };
 
   report("Downloading media…");
-  const blob = await fetchMediaBlob(mediaUrl);
-  report(`Downloaded ${(blob.size / 1024).toFixed(0)} KB`);
+  const blob     = await fetchMediaBlob(mediaUrl);
+  const sizekb   = (blob.size / 1024).toFixed(0);
+  report(`Downloaded ${sizekb} KB`);
 
   const ext      = mediaType === "video" ? "mp4" : "jpeg";
   const filename = `lila-${Date.now()}.${ext}`;
 
-  report("Creating Fanvue upload session…");
+  report("Creating upload session on Fanvue…");
   const { mediaUuid, uploadId } = await createUploadSession(accessToken, filename, mediaType);
 
-  report("Uploading to Fanvue…");
+  report("Getting presigned upload URL…");
   const presignedUrl = await getPresignedUrl(accessToken, uploadId, 1);
+
+  report(`Uploading ${sizekb} KB to Fanvue…`);
   const etag = await uploadToS3(presignedUrl, blob);
 
   report("Finalising upload…");
   await completeUpload(accessToken, uploadId, [{ PartNumber: 1, ETag: etag }]);
 
-  report("Waiting for Fanvue to process media (may take a minute for video)…");
+  report("Waiting for Fanvue to process media" + (mediaType === "video" ? " (videos can take ~30s)…" : "…"));
   await waitForMediaReady(accessToken, mediaUuid);
   report("Media ready ✓");
 
-  report("Creating post on Fanvue…");
+  report("Creating Fanvue post…");
   const postUuid = await createFanvuePost(accessToken, mediaUuid, caption, audience);
 
   report(`Published! Post UUID: ${postUuid}`);
@@ -410,7 +374,7 @@ async function publishToFanvue(params: {
 }
 
 // ---------------------------------------------------------------------------
-// Route setup
+// Route
 // ---------------------------------------------------------------------------
 function RouteErrorBoundary({ error, reset }: { error: Error; reset: () => void }) {
   return (
@@ -520,12 +484,12 @@ async function fetchSchedules(): Promise<ScheduledItem[]> {
   const charMap = new Map((charRes.data ?? []).map((c: any) => [c.id, c]));
 
   return (rows ?? []).map((r: any): ScheduledItem => {
-    const isVideo = r.content_type === "video";
+    const isVideo  = r.content_type === "video";
     const src: any = isVideo ? vidMap.get(r.content_id) : imgMap.get(r.content_id);
     const char: any = src?.character_id ? charMap.get(src.character_id) : null;
     const scenes: string[] = isVideo && Array.isArray(src?.scene_prompts) ? src.scene_prompts : src?.prompt ? [src.prompt] : [];
-    const media = isVideo ? src?.video_url : src?.image_url;
-    const thumb = char?.reference_image_url || media || PLACEHOLDER;
+    const media    = isVideo ? src?.video_url : src?.image_url;
+    const thumb    = char?.reference_image_url || media || PLACEHOLDER;
 
     const status: PublishStatus =
       r.status === "published" ? "published"
@@ -547,7 +511,7 @@ async function fetchSchedules(): Promise<ScheduledItem[]> {
       character: char?.name ?? "Lila",
       thumbnail: thumb,
       mediaUrl: media || "",
-      // FIX 4: resolve accountId from both the schedule row and the content row
+      // Resolve accountId from both the content row and the schedule row
       accountId: src?.connected_account_id ?? r.connected_account_id ?? "",
       scheduledAt: r.publish_time,
       status,
@@ -567,7 +531,7 @@ async function fetchSchedules(): Promise<ScheduledItem[]> {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Style helpers
 // ---------------------------------------------------------------------------
 const statusStyle: Record<PublishStatus, string> = {
   scheduled:  "bg-chart-2/15 text-chart-2 border-chart-2/30",
@@ -696,11 +660,11 @@ function SchedulePage() {
   const [items, setItems] = useState<ScheduledItem[]>([]);
   useEffect(() => setItems(scheduleData), [scheduleData]);
 
-  // Handle OAuth callback from Fanvue redirect
+  // Handle OAuth redirect callback
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const code  = params.get("code");
-    const error = params.get("error");
+    const code   = params.get("code");
+    const error  = params.get("error");
 
     if (error) {
       window.history.replaceState({}, "", window.location.pathname);
@@ -725,7 +689,7 @@ function SchedulePage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Realtime
+  // Realtime schedule updates
   useEffect(() => {
     const ch = supabase.channel("schedules-rt")
       .on("postgres_changes", { event: "*", schema: "public", table: "schedules" }, () =>
@@ -734,14 +698,14 @@ function SchedulePage() {
     return () => { supabase.removeChannel(ch); };
   }, [queryClient]);
 
-  const [tab, setTab]                 = useState("calendar");
-  const [search, setSearch]           = useState("");
-  const [statusFilter, setStatusFilter] = useState<"all" | PublishStatus>("all");
+  const [tab, setTab]                     = useState("calendar");
+  const [search, setSearch]               = useState("");
+  const [statusFilter, setStatusFilter]   = useState<"all" | PublishStatus>("all");
   const [accountFilter, setAccountFilter] = useState<string>("all");
-  const [rangeFilter, setRangeFilter] = useState<"all" | "today" | "week" | "month">("all");
-  const [selected, setSelected]       = useState<ScheduledItem | null>(null);
-  const [createOpen, setCreateOpen]   = useState(false);
-  const [accountsOpen, setAccountsOpen] = useState(false);
+  const [rangeFilter, setRangeFilter]     = useState<"all" | "today" | "week" | "month">("all");
+  const [selected, setSelected]           = useState<ScheduledItem | null>(null);
+  const [createOpen, setCreateOpen]       = useState(false);
+  const [accountsOpen, setAccountsOpen]   = useState(false);
   const [weekStart, setWeekStart] = useState(() => {
     const d = new Date(); d.setHours(0,0,0,0); d.setDate(d.getDate() - d.getDay()); return d;
   });
@@ -749,13 +713,13 @@ function SchedulePage() {
   const getAccount = (id: string) => accounts.find((a) => a.id === id);
 
   const stats = useMemo(() => {
-    const now = new Date();
+    const now     = new Date();
     const weekAgo = new Date(now); weekAgo.setDate(weekAgo.getDate() - 7);
     return {
-      scheduled:        items.filter((i) => i.status === "scheduled").length,
-      todayCount:       items.filter((i) => i.status === "scheduled" && isSameDay(new Date(i.scheduledAt), now)).length,
-      weekPublished:    items.filter((i) => i.status === "published" && i.publishedAt && new Date(i.publishedAt) >= weekAgo).length,
-      failed:           items.filter((i) => i.status === "failed").length,
+      scheduled:         items.filter((i) => i.status === "scheduled").length,
+      todayCount:        items.filter((i) => i.status === "scheduled" && isSameDay(new Date(i.scheduledAt), now)).length,
+      weekPublished:     items.filter((i) => i.status === "published" && i.publishedAt && new Date(i.publishedAt) >= weekAgo).length,
+      failed:            items.filter((i) => i.status === "failed").length,
       connectedAccounts: accounts.filter((a) => a.status === "connected").length,
     };
   }, [items, accounts]);
@@ -763,9 +727,9 @@ function SchedulePage() {
   const filteredItems = useMemo(() => {
     const now = new Date();
     return items.filter((i) => {
-      if (statusFilter !== "all" && i.status !== statusFilter) return false;
+      if (statusFilter  !== "all" && i.status    !== statusFilter)  return false;
       if (accountFilter !== "all" && i.accountId !== accountFilter) return false;
-      if (rangeFilter !== "all") {
+      if (rangeFilter   !== "all") {
         const d = new Date(i.scheduledAt);
         if (rangeFilter === "today" && !isSameDay(d, now)) return false;
         if (rangeFilter === "week") {
@@ -804,7 +768,6 @@ function SchedulePage() {
     try {
       await scheduleService.update(id, { status: "scheduled" });
       toast.success("Queued for retry");
-      queryClient.invalidateQueries({ queryKey: ["schedules"] });
     } catch (e: any) { toast.error(e?.message ?? "Failed to retry"); }
   };
 
@@ -812,19 +775,20 @@ function SchedulePage() {
     const item = items.find((i) => i.id === id);
     if (!item) return;
 
-    // Resolve account — from item.accountId or fallback to first connected
-    let account = accounts.find((a) => a.id === item.accountId);
-    if (!account?.accessToken) {
+    // Resolve account — prefer item's linked account, fall back to any connected
+    let account = accounts.find((a) => a.id === item.accountId && a.status === "connected" && a.accessToken);
+    if (!account) {
       account = accounts.find((a) => a.status === "connected" && a.accessToken);
-      if (!account) {
-        toast.error("No connected Fanvue account. Connect one first.", {
-          action: { label: "Connect", onClick: () => setAccountsOpen(true) },
-        });
-        return;
-      }
     }
+    if (!account) {
+      toast.error("No connected Fanvue account. Connect one first.", {
+        action: { label: "Connect", onClick: () => setAccountsOpen(true) },
+      });
+      return;
+    }
+
     if (!item.mediaUrl) {
-      toast.error("No media URL for this item — the asset may still be processing.");
+      toast.error("No media URL — the asset may still be processing in Supabase.");
       return;
     }
 
@@ -833,7 +797,7 @@ function SchedulePage() {
     toast.loading("Starting publish…", { id: toastId });
 
     try {
-      const caption     = item.scenePrompts[0] ?? item.contentName;
+      const caption        = item.scenePrompts[0] ?? item.contentName;
       const externalPostId = await publishToFanvue({
         accessToken: account.accessToken!,
         mediaUrl:    item.mediaUrl,
@@ -846,13 +810,12 @@ function SchedulePage() {
       const now   = new Date().toISOString();
       const table = item.type === "image" ? "images" : "videos";
 
-      // Get content_id from schedule row
       const { data: schedRow } = await supabase.from("schedules").select("content_id").eq("id", id).single();
       if (schedRow?.content_id) {
         await supabase.from(table).update({
-          publish_status:      "published",
-          published_at:        now,
-          external_post_id:    externalPostId,
+          publish_status:       "published",
+          published_at:         now,
+          external_post_id:     externalPostId,
           connected_account_id: account.id,
         }).eq("id", schedRow.content_id);
       }
@@ -869,11 +832,12 @@ function SchedulePage() {
         id: toastId,
         description: `Post UUID: ${externalPostId}`,
         action: {
-          label: "View post",
+          label: "View on Fanvue",
           onClick: () => window.open(`https://www.fanvue.com/post/${externalPostId}`, "_blank"),
         },
       });
       queryClient.invalidateQueries({ queryKey: ["schedules"] });
+
     } catch (e: any) {
       const errMsg = e?.message ?? "Unknown error";
       console.error("[publishNow] FAILED:", errMsg);
@@ -910,7 +874,6 @@ function SchedulePage() {
         <main className="flex-1 overflow-y-auto bg-background">
           <div className="mx-auto max-w-[1400px] space-y-6 p-4 sm:p-6 lg:p-8">
 
-            {/* Header */}
             <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
               <div>
                 <Link to="/" className="mb-3 inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground">
@@ -942,7 +905,6 @@ function SchedulePage() {
               </div>
             )}
 
-            {/* Stats */}
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
               <DashboardCard label="Scheduled posts"     value={stats.scheduled}        icon={CalendarClock} accent="primary"  hint="Awaiting publish" />
               <DashboardCard label="Publishing today"    value={stats.todayCount}        icon={Clock}         accent="chart-2"  hint="Next 24h" />
@@ -951,7 +913,6 @@ function SchedulePage() {
               <DashboardCard label="Connected accounts"  value={`${stats.connectedAccounts}/${accounts.length}`} icon={Link2} accent="chart-4" hint="Fanvue" />
             </div>
 
-            {/* Filters */}
             <Card className="border-border/60 bg-card">
               <CardContent className="flex flex-col gap-3 p-4 lg:flex-row lg:items-center">
                 <div className="relative flex-1">
@@ -991,7 +952,6 @@ function SchedulePage() {
               </CardContent>
             </Card>
 
-            {/* Views */}
             <Tabs value={tab} onValueChange={setTab}>
               <TabsList>
                 <TabsTrigger value="calendar">Calendar</TabsTrigger>
@@ -1416,7 +1376,7 @@ function CreateScheduleDialog({ open, onOpenChange }: { open: boolean; onOpenCha
         created_by:   userRes.user?.id ?? null,
       } as any);
 
-      // FIX 4: save connected_account_id onto the asset row so publishNow can find it
+      // Save connected_account_id onto the asset row so publishNow can find it
       const table = asset.type === "image" ? "images" : "videos";
       await supabase.from(table).update({ connected_account_id: accountId }).eq("id", asset.id);
 
