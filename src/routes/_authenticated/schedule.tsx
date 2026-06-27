@@ -1,7 +1,4 @@
-Write final corrected schedule.tsx
-bash
 
-cat > /mnt/user-data/outputs/schedule.tsx << 'TYPESCRIPT_EOF'
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -1300,9 +1297,3 @@ function CreateScheduleDialog({ open, onOpenChange, accounts }: {
     </Dialog>
   );
 }
-TYPESCRIPT_EOF
-echo "Done: $(wc -l < /mnt/user-data/outputs/schedule.tsx) lines"
-Output
-
-Done: 1298 lines
-Done
