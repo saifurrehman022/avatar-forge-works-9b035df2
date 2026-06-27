@@ -1,8 +1,3 @@
-Here is the fully restored, complete `schedule.tsx` file code.
-
-This version contains all the layout UI elements, the functional interactive panels (Calendar Grid, Queue list, History table, and sliding drawer view panels), alongside the upgraded, ultra-safe `exchangeFanvueCode` parsing pipeline to make sure your rows save seamlessly into Supabase.
-
-```tsx
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -1133,5 +1128,3 @@ async function fetchApprovedAssets(): Promise<ApprovedAsset[]> {
     ...(vidRes.data ?? []).map((v: any) => ({ id: v.id, type: "video" as const, name: `[Video] — ${v.prompt?.slice(0,35)}…` })),
   ];
 }
-
-```
