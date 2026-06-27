@@ -465,7 +465,7 @@ async function publishToFanvue(params: {
     mediaUrl,
     mediaType,
     caption,
-    audience = "subscribers",
+    audience = "followers-and-subscribers",
     onProgress,
   } = params;
 
@@ -1076,7 +1076,7 @@ function SchedulePage() {
         mediaUrl: item.mediaUrl,
         mediaType: item.type,
         caption,
-        audience: "subscribers",
+        audience: "followers-and-subscribers",
         onProgress: (step) => toast.loading(step, { id: toastId }),
       });
 
@@ -1827,7 +1827,20 @@ function DetailSheet({
               {(item.externalPostId || item.publishedAt) && (
                 <div className="grid grid-cols-2 gap-3">
                   {item.publishedAt    && <Field label="Published at"    value={fmtDateTime(item.publishedAt)} />}
-                  {item.externalPostId && <Field label="Fanvue Post UUID" value={item.externalPostId} mono />}
+                  {item.externalPostId && (
+                    <div className="rounded-md border border-border bg-background/40 p-3 col-span-2">
+                      <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Fanvue Post</p>
+                      <p className="mt-1 font-mono text-xs text-foreground break-all">{item.externalPostId}</p>
+                      <a
+                        href={`https://www.fanvue.com/post/${item.externalPostId}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="mt-2 inline-flex items-center gap-1.5 text-xs text-primary hover:underline"
+                      >
+                        <ExternalLink className="h-3 w-3" /> View post on Fanvue
+                      </a>
+                    </div>
+                  )}
                 </div>
               )}
 
