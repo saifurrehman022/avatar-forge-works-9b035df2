@@ -55,7 +55,12 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
 // ─────────────────────────────────────────────────────────────────────────────
 const FANVUE_CLIENT_ID     = "f9d35fff-3d12-4dd5-8945-750c37d65ae9";
 const FANVUE_CLIENT_SECRET = "05275891c81581c5cb79d336c8e9f87680f0976843bf17d6737bdcf0dde38b1a";
-const FANVUE_REDIRECT_URI  = "https://avatar-forge-works-9b035df2-j56ivc6di-saifurrehman022s-projects.vercel.app/schedule";
+
+// FIXED: Dynamically map origin to support seamless branch and preview redirects safely
+const FANVUE_REDIRECT_URI  = typeof window !== "undefined"
+  ? `${window.location.origin}/schedule`
+  : "https://avatar-forge-works-9b035df2-j56ivc6di-saifurrehman022s-projects.vercel.app/schedule";
+
 const FANVUE_AUTH_URL      = "https://auth.fanvue.com/oauth2/auth";
 const FANVUE_TOKEN_URL     = "https://auth.fanvue.com/oauth2/token";
 const FANVUE_API_BASE      = "https://api.fanvue.com";
@@ -105,8 +110,11 @@ const STATE_KEY = "fanvue_oauth_state";
 async function startFanvueOAuth() {
   const { verifier, challenge } = await generatePKCE();
   const state = crypto.randomUUID();
-  sessionStorage.setItem(PKCE_KEY, verifier);
-  sessionStorage.setItem(STATE_KEY, state);
+  
+  // FIXED: Migrated to localStorage to persist across state changes securely
+  localStorage.setItem(PKCE_KEY, verifier);
+  localStorage.setItem(STATE_KEY, state);
+  
   const p = new URLSearchParams({
     client_id:             FANVUE_CLIENT_ID,
     redirect_uri:          FANVUE_REDIRECT_URI,
@@ -120,10 +128,11 @@ async function startFanvueOAuth() {
 }
 
 async function exchangeFanvueCode(code: string): Promise<void> {
-  const verifier = sessionStorage.getItem(PKCE_KEY);
+  // FIXED: Read handshake context out of localStorage securely
+  const verifier = localStorage.getItem(PKCE_KEY);
   if (!verifier) throw new Error("PKCE verifier missing — reconnect please");
-  sessionStorage.removeItem(PKCE_KEY);
-  sessionStorage.removeItem(STATE_KEY);
+  localStorage.removeItem(PKCE_KEY);
+  localStorage.removeItem(STATE_KEY);
 
   const res = await fetch(FANVUE_TOKEN_URL, {
     method: "POST",
@@ -177,22 +186,35 @@ async function exchangeFanvueCode(code: string): Promise<void> {
     console.warn("Could not query user identity execution context:", e);
   }
 
-  console.log("Saving account payload to Supabase:", upsertPayload);
+  console.log("Saving account payload to Supabase via Select/Insert strategy:", upsertPayload);
 
-  const { error: upsertError } = await supabase
+  // FIXED: Explicit lookup strategy to handle scenarios where unique database indices are absent
+  const { data: existingRow, error: checkError } = await supabase
     .from("connected_accounts")
-    .upsert(upsertPayload, { onConflict: "external_account_id" });
+    .select("id")
+    .eq("external_account_id", realUuid)
+    .maybeSingle();
 
-  if (upsertError) {
-    console.error("Primary upsert failed, testing insert pipeline fallback:", upsertError);
-    
+  if (checkError) {
+    console.error("Lookup check trace error:", checkError);
+  }
+
+  if (existingRow?.id) {
+    const { error: updateError } = await supabase
+      .from("connected_accounts")
+      .update(upsertPayload)
+      .eq("id", existingRow.id);
+
+    if (updateError) {
+      throw new Error(`Database Update Failure: ${updateError.message}`);
+    }
+  } else {
     const { error: insertError } = await supabase
       .from("connected_accounts")
       .insert(upsertPayload);
 
     if (insertError) {
-      toast.error(`Database Rejected Row: ${insertError.message}`, { duration: 10000 });
-      throw new Error(`Database Write Failure: ${insertError.message}`);
+      throw new Error(`Database Insert Failure: ${insertError.message}`);
     }
   }
 }
