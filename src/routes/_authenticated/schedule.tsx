@@ -57,9 +57,8 @@ const FANVUE_CLIENT_ID     = "f9d35fff-3d12-4dd5-8945-750c37d65ae9";
 const FANVUE_CLIENT_SECRET = "05275891c81581c5cb79d336c8e9f87680f0976843bf17d6737bdcf0dde38b1a";
 
 // FIXED: Dynamically map origin to support seamless branch and preview redirects safely
-const FANVUE_REDIRECT_URI  = typeof window !== "undefined"
-  ? `${window.location.origin}/schedule`
-  : "https://avatar-forge-works-9b035df2-olive.vercel.app/schedule";
+// Look for FANVUE_REDIRECT_URI near the top of the file and replace it exactly with this:
+const FANVUE_REDIRECT_URI = "https://avatar-forge-works-9b035df2-j56ivc6di-saifurrehman022s-projects.vercel.app/schedule";
 
 const FANVUE_AUTH_URL      = "https://auth.fanvue.com/oauth2/auth";
 const FANVUE_TOKEN_URL     = "https://auth.fanvue.com/oauth2/token";
