@@ -43,7 +43,7 @@ import { cn } from "@/lib/utils";
 // Target Supabase Configuration
 // ─────────────────────────────────────────────────────────────────────────────
 const SUPABASE_URL = "https://yaiygjwbtzevjpxncvzu.supabase.co";
-const SUPABASE_KEY = "sb_secret_yJPCJXAj7ZiYD27n0dsNSw_D3xTCQkC";
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlhaXlnandidHpldmpweG5jdnp1Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4MTQ2NTA0MiwiZXhwIjoyMDk3MDQxMDQyfQ.ui2Nt6AmAJv8v5XLf2ozumHlBG4BXg7ROIuo80V9UXk";
 
 // Explicit custom client instance ensuring interaction with the active table setup
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
