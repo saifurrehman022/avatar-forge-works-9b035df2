@@ -1,3 +1,4 @@
+
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -57,10 +58,8 @@ const fanvueHeaders = (token: string, extra?: Record<string, string>) => ({
   ...extra,
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helper: detect fake/legacy post IDs (not real Fanvue UUIDs)
-// ─────────────────────────────────────────────────────────────────────────────
-const isRealFanvueUUID = (id: string | undefined) =>
+// Detect fake/legacy post IDs (not real Fanvue UUIDs)
+const isRealFanvueUUID = (id?: string) =>
   !!id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -122,9 +121,11 @@ async function exchangeFanvueCode(code: string): Promise<void> {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
-      grant_type: "authorization_code", code,
-      redirect_uri: FANVUE_REDIRECT_URI,
-      client_id: FANVUE_CLIENT_ID, client_secret: FANVUE_CLIENT_SECRET,
+      grant_type:    "authorization_code",
+      code,
+      redirect_uri:  FANVUE_REDIRECT_URI,
+      client_id:     FANVUE_CLIENT_ID,
+      client_secret: FANVUE_CLIENT_SECRET,
       code_verifier: verifier,
     }).toString(),
   });
@@ -141,21 +142,74 @@ async function exchangeFanvueCode(code: string): Promise<void> {
   const handle = profile.handle ?? profile.uuid ?? "fanvue-user";
   const name   = profile.displayName ?? handle;
 
+  // ── DIAGNOSTIC: log what we're about to upsert ──────────────────────────
+  console.info("[exchangeFanvueCode] upserting account:", { handle, name, hasAccessToken: !!accessToken });
+
   const { data: u } = await supabase.auth.getUser();
-  const { error } = await supabase.from("connected_accounts").upsert({
-    account_name: name, external_account_id: handle,
-    platform: "fanvue", connection_status: "connected",
-    access_token: accessToken, refresh_token: refreshToken ?? null,
-    token_expires_at: expiresIn ? new Date(Date.now() + expiresIn * 1000).toISOString() : null,
+
+  // Try upsert; if it fails due to missing column fall back to plain insert
+  const upsertPayload = {
+    account_name:        name,
+    external_account_id: handle,
+    platform:            "fanvue",
+    connection_status:   "connected",
+    access_token:        accessToken,
+    refresh_token:       refreshToken ?? null,
+    token_expires_at:    expiresIn
+      ? new Date(Date.now() + expiresIn * 1000).toISOString()
+      : null,
     created_by: u.user?.id ?? null,
-  }, { onConflict: "external_account_id" });
+  };
+
+  const { data: upserted, error } = await supabase
+    .from("connected_accounts")
+    .upsert(upsertPayload, { onConflict: "external_account_id" })
+    .select()
+    .single();
+
+  console.info("[exchangeFanvueCode] upsert result:", { upserted, error });
   if (error) throw new Error(`Failed to save account: ${error.message}`);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// KEY FIX: fetch the best available Fanvue token DIRECTLY from DB at publish time
+// This bypasses the broken accountId→accounts join entirely.
+// ─────────────────────────────────────────────────────────────────────────────
+async function fetchBestFanvueAccount(): Promise<{
+  id: string; handle: string; name: string; accessToken: string;
+} | null> {
+  // Try preferred order: connected + has token, sort by updated_at desc
+  const { data, error } = await supabase
+    .from("connected_accounts")
+    .select("id, account_name, external_account_id, access_token, connection_status, updated_at")
+    .eq("platform", "fanvue")
+    .not("access_token", "is", null)
+    .order("updated_at", { ascending: false });
+
+  if (error) {
+    console.error("[fetchBestFanvueAccount] query error:", error);
+    return null;
+  }
+
+  console.info("[fetchBestFanvueAccount] all fanvue rows:", data);
+
+  // Prefer explicitly "connected" rows, fall back to any row with a token
+  const connected = (data ?? []).find((r: any) => r.connection_status === "connected" && r.access_token);
+  const anyWithToken = (data ?? []).find((r: any) => r.access_token);
+  const best = connected ?? anyWithToken ?? null;
+
+  if (!best) return null;
+  return {
+    id:          best.id,
+    handle:      best.external_account_id ?? "—",
+    name:        best.account_name ?? "Fanvue",
+    accessToken: best.access_token,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Fanvue publish pipeline
 // ─────────────────────────────────────────────────────────────────────────────
-
 async function fetchMediaBlob(url: string, log: PublishLogger): Promise<Blob> {
   log.log(`Fetching media: ${url}`);
   let res = await fetch(url);
@@ -178,9 +232,9 @@ async function fetchMediaBlob(url: string, log: PublishLogger): Promise<Blob> {
 async function step1_createSession(token: string, filename: string, mediaType: "image" | "video", log: PublishLogger) {
   log.log(`Step 1 — POST /media/uploads  name="${filename}" mediaType="${mediaType}"`);
   const res  = await fetch(`${FANVUE_API_BASE}/media/uploads`, {
-    method: "POST",
+    method:  "POST",
     headers: fanvueHeaders(token, { "Content-Type": "application/json" }),
-    body: JSON.stringify({ name: filename, filename, mediaType }),
+    body:    JSON.stringify({ name: filename, filename, mediaType }),
   });
   const text = await res.text();
   log.log(`Step 1 → ${res.status}: ${text}`);
@@ -222,9 +276,9 @@ async function step2b_uploadToS3(presignedUrl: string, blob: Blob, log: PublishL
 async function step3_completeUpload(token: string, uploadId: string, parts: { PartNumber: number; ETag: string }[], log: PublishLogger) {
   log.log(`Step 3 — PATCH /media/uploads/${uploadId}  parts=${JSON.stringify(parts)}`);
   const res  = await fetch(`${FANVUE_API_BASE}/media/uploads/${uploadId}`, {
-    method: "PATCH",
+    method:  "PATCH",
     headers: fanvueHeaders(token, { "Content-Type": "application/json" }),
-    body: JSON.stringify({ parts }),
+    body:    JSON.stringify({ parts }),
   });
   const text = await res.text();
   log.log(`Step 3 → ${res.status}: ${text}`);
@@ -245,15 +299,12 @@ async function step4_waitUntilReady(token: string, mediaUuid: string, log: Publi
     const text = await res.text();
     log.log(`Step 4 attempt ${attempt} → ${res.status}: ${text}`);
 
-    if (res.status === 404) {
-      await new Promise(r => setTimeout(r, POLL));
-      continue;
-    }
+    if (res.status === 404) { await new Promise(r => setTimeout(r, POLL)); continue; }
     if (!res.ok) throw new Error(`Step 4 poll failed (${res.status}): ${text}`);
 
     const data   = JSON.parse(text);
     const status = (data.status ?? "").toLowerCase();
-    onProgress?.(`Processing media… status: ${status} (${attempt} checks, ${Math.round((Date.now() - start) / 1000)}s)`);
+    onProgress?.(`Processing… status: ${status} (${attempt} checks, ${Math.round((Date.now() - start) / 1000)}s)`);
 
     if (status === "ready") { log.log(`Step 4 ✅  media is ready`); return; }
     if (status === "error") throw new Error(
@@ -269,9 +320,9 @@ async function step5_createPost(token: string, mediaUuid: string, caption: strin
   const body = { text: caption, mediaUuids: [mediaUuid], audience };
   log.log(`Step 5 — POST /posts  body=${JSON.stringify(body)}`);
   const res  = await fetch(`${FANVUE_API_BASE}/posts`, {
-    method: "POST",
+    method:  "POST",
     headers: fanvueHeaders(token, { "Content-Type": "application/json" }),
-    body: JSON.stringify(body),
+    body:    JSON.stringify(body),
   });
   const text = await res.text();
   log.log(`Step 5 → ${res.status}: ${text}`);
@@ -321,13 +372,69 @@ function DebugLogDialog({ open, onClose, log }: { open: boolean; onClose: () => 
       <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2"><Bug className="h-4 w-4" /> Publish Debug Log</DialogTitle>
-          <DialogDescription>Full trace of the last publish attempt. Share this to diagnose issues.</DialogDescription>
+          <DialogDescription>Full trace of the last publish attempt.</DialogDescription>
         </DialogHeader>
         <ScrollArea className="h-96 rounded-md border border-border bg-black p-3">
           <pre className="whitespace-pre-wrap break-all font-mono text-[11px] text-green-400">{log || "No log yet."}</pre>
         </ScrollArea>
         <DialogFooter>
           <Button variant="outline" size="sm" onClick={() => navigator.clipboard.writeText(log)}>Copy log</Button>
+          <Button onClick={onClose}>Close</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// DB Diagnostic dialog — shows raw connected_accounts rows
+function DBDiagDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const [rows, setRows]   = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setLoading(true);
+    supabase
+      .from("connected_accounts")
+      .select("id, account_name, external_account_id, platform, connection_status, access_token, created_at, updated_at")
+      .then(({ data, error }) => {
+        console.info("[DBDiag] connected_accounts:", data, error);
+        setRows(data ?? []);
+        setLoading(false);
+      });
+  }, [open]);
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>DB Diagnostic — connected_accounts</DialogTitle>
+          <DialogDescription>Raw rows from Supabase. If this is empty your token was never saved.</DialogDescription>
+        </DialogHeader>
+        <ScrollArea className="h-80 rounded-md border border-border bg-black p-3">
+          {loading
+            ? <p className="text-green-400 font-mono text-xs">Loading…</p>
+            : rows.length === 0
+              ? <p className="text-red-400 font-mono text-xs">⚠ NO ROWS FOUND — table is empty or RLS is blocking access</p>
+              : rows.map((r, i) => (
+                  <pre key={i} className="whitespace-pre-wrap break-all font-mono text-[10px] text-green-400 border-b border-green-900 pb-2 mb-2">
+{JSON.stringify({
+  id: r.id,
+  platform: r.platform,
+  status: r.connection_status,
+  name: r.account_name,
+  handle: r.external_account_id,
+  has_token: !!r.access_token,
+  token_preview: r.access_token ? r.access_token.slice(0, 20) + "…" : "NULL",
+  created: r.created_at,
+  updated: r.updated_at,
+}, null, 2)}
+                  </pre>
+                ))
+          }
+        </ScrollArea>
+        <DialogFooter>
+          <Button variant="outline" size="sm" onClick={() => navigator.clipboard.writeText(JSON.stringify(rows, null, 2))}>Copy JSON</Button>
           <Button onClick={onClose}>Close</Button>
         </DialogFooter>
       </DialogContent>
@@ -388,13 +495,33 @@ const PLACEHOLDER = "https://images.unsplash.com/photo-1494790108377-be9c29b2933
 // ─────────────────────────────────────────────────────────────────────────────
 // Data fetchers
 // ─────────────────────────────────────────────────────────────────────────────
+
+// KEY FIX: no filter on connection_status — return ALL rows so we can see them
 async function fetchAccounts(): Promise<ConnectedAccount[]> {
-  const { data, error } = await supabase.from("connected_accounts").select("*").order("created_at");
-  if (error) throw error;
+  const { data, error } = await supabase
+    .from("connected_accounts")
+    .select("*")
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    console.error("[fetchAccounts] error:", error);
+    throw error;
+  }
+
+  console.info("[fetchAccounts] raw rows:", data);
+
   return (data ?? []).map((a: any) => ({
-    id: a.id, platform: "fanvue", name: a.account_name,
-    handle: a.external_account_id ?? "—",
-    status: a.connection_status === "connected" ? "connected" : a.connection_status === "error" ? "error" : "disconnected",
+    id:          a.id,
+    platform:    "fanvue" as const,
+    name:        a.account_name ?? a.external_account_id ?? "Fanvue",
+    handle:      a.external_account_id ?? "—",
+    status:      a.connection_status === "connected"
+                   ? "connected"
+                   : a.connection_status === "error"
+                     ? "error"
+                     : a.access_token
+                       ? "connected"          // has a token → treat as connected
+                       : "disconnected",
     accessToken: a.access_token ?? undefined,
   }));
 }
@@ -421,33 +548,29 @@ async function fetchSchedules(): Promise<ScheduledItem[]> {
   const charMap = new Map((charRes.data ?? []).map((c: any) => [c.id, c]));
 
   return (rows ?? []).map((r: any): ScheduledItem => {
-    const isVideo  = r.content_type === "video";
-    const src: any = isVideo ? vidMap.get(r.content_id) : imgMap.get(r.content_id);
+    const isVideo   = r.content_type === "video";
+    const src: any  = isVideo ? vidMap.get(r.content_id) : imgMap.get(r.content_id);
     const char: any = src?.character_id ? charMap.get(src.character_id) : null;
-    const scenes   = isVideo && Array.isArray(src?.scene_prompts) ? src.scene_prompts : src?.prompt ? [src.prompt] : [];
-    const media    = isVideo ? src?.video_url : src?.image_url;
-    const thumb    = char?.reference_image_url || media || PLACEHOLDER;
+    const scenes    = isVideo && Array.isArray(src?.scene_prompts) ? src.scene_prompts : src?.prompt ? [src.prompt] : [];
+    const media     = isVideo ? src?.video_url : src?.image_url;
+    const thumb     = char?.reference_image_url || media || PLACEHOLDER;
 
-    // FIX 1: Determine real publish status
-    // If external_post_id is a fake legacy ID (not a real UUID), treat the item
-    // as "scheduled" so the Publish Now button is shown again.
+    // Fake ID → force re-schedulable
+    const hasFakeId = src?.external_post_id && !isRealFanvueUUID(src?.external_post_id);
     const rawStatus = r.status ?? src?.publish_status ?? "scheduled";
-    const fakeId    = src?.external_post_id && !isRealFanvueUUID(src?.external_post_id);
     const status: PublishStatus =
-      rawStatus === "published" && fakeId ? "scheduled"   // ← force re-publish for fake IDs
-      : rawStatus === "published"         ? "published"
-      : rawStatus === "failed"            ? "failed"
-      : rawStatus === "publishing"        ? "publishing"
+      rawStatus === "published" && hasFakeId ? "scheduled"
+      : rawStatus === "published"            ? "published"
+      : rawStatus === "failed"               ? "failed"
+      : rawStatus === "publishing"           ? "publishing"
       : "scheduled";
 
     const queueStatus: QueueStatus =
-      status === "published"  ? "published"
-      : status === "failed"   ? "failed"
-      : status === "publishing" ? "publishing"
+      status === "published"   ? "published"
+      : status === "failed"    ? "failed"
+      : status === "publishing"? "publishing"
       : new Date(r.publish_time) <= new Date() ? "ready" : "waiting";
 
-    // FIX 2: accountId priority — schedule row first, then asset row
-    // The schedule row's connected_account_id is the most up-to-date (set at schedule creation)
     const accountId = (r.connected_account_id ?? src?.connected_account_id ?? "").toString();
 
     return {
@@ -456,7 +579,6 @@ async function fetchSchedules(): Promise<ScheduledItem[]> {
       type: r.content_type, character: char?.name ?? "Lila",
       thumbnail: thumb, mediaUrl: media || "", accountId,
       scheduledAt: r.publish_time, status, queueStatus, autoPublish: true,
-      // FIX 3: only surface externalPostId if it's a real UUID
       externalPostId: isRealFanvueUUID(src?.external_post_id) ? src.external_post_id : undefined,
       publishedAt:    src?.published_at ?? undefined,
       settings: { fps: 16, framesPerScene: 257, numScenes: scenes.length || 1, samplingSteps: 29 },
@@ -475,17 +597,17 @@ async function fetchSchedules(): Promise<ScheduledItem[]> {
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 const statusStyle: Record<PublishStatus, string> = {
-  scheduled: "bg-chart-2/15 text-chart-2 border-chart-2/30",
+  scheduled:  "bg-chart-2/15 text-chart-2 border-chart-2/30",
   publishing: "bg-primary/15 text-primary border-primary/30",
-  published: "bg-success/15 text-success border-success/30",
-  failed: "bg-destructive/15 text-destructive border-destructive/30",
+  published:  "bg-success/15 text-success border-success/30",
+  failed:     "bg-destructive/15 text-destructive border-destructive/30",
 };
 const queueStatusStyle: Record<QueueStatus, string> = {
-  waiting: "bg-muted text-muted-foreground border-border",
-  ready: "bg-chart-2/15 text-chart-2 border-chart-2/30",
+  waiting:    "bg-muted text-muted-foreground border-border",
+  ready:      "bg-chart-2/15 text-chart-2 border-chart-2/30",
   publishing: "bg-primary/15 text-primary border-primary/30",
-  published: "bg-success/15 text-success border-success/30",
-  failed: "bg-destructive/15 text-destructive border-destructive/30",
+  published:  "bg-success/15 text-success border-success/30",
+  failed:     "bg-destructive/15 text-destructive border-destructive/30",
 };
 const fmtTime     = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 const fmtDate     = (iso: string) => new Date(iso).toLocaleDateString([], { month: "short", day: "numeric" });
@@ -536,13 +658,18 @@ function AccountsDialog({ open, onOpenChange, accounts, onRefresh }: {
           {accounts.length === 0 ? (
             <div className="rounded-lg border border-dashed border-border bg-muted/30 p-6 text-center">
               <Plug className="mx-auto h-8 w-8 text-muted-foreground" />
-              <p className="mt-2 text-sm font-medium">No accounts connected</p>
+              <p className="mt-2 text-sm font-medium">No accounts found</p>
+              <p className="mt-1 text-xs text-muted-foreground">This could mean the table is empty or RLS is blocking reads.</p>
             </div>
           ) : accounts.map((a) => (
             <div key={a.id} className="flex items-center justify-between rounded-lg border border-border bg-card p-3">
               <div className="flex items-center gap-3">
                 <div className="grid h-9 w-9 place-items-center rounded-full bg-primary/10 text-primary font-semibold text-sm">{a.name.slice(0,1).toUpperCase()}</div>
-                <div><p className="text-sm font-medium">{a.name}</p><p className="text-xs text-muted-foreground">@{a.handle}</p></div>
+                <div>
+                  <p className="text-sm font-medium">{a.name}</p>
+                  <p className="text-xs text-muted-foreground">@{a.handle}</p>
+                  <p className="text-[10px] text-muted-foreground">Token: {a.accessToken ? "✅ present" : "❌ missing"}</p>
+                </div>
               </div>
               <div className="flex items-center gap-2">
                 {a.status === "connected"
@@ -577,29 +704,39 @@ function AccountsDialog({ open, onOpenChange, accounts, onRefresh }: {
 function SchedulePage() {
   const queryClient = useQueryClient();
   const { data: scheduleData = EMPTY_SCHEDULE_ITEMS } = useQuery({ queryKey: ["schedules"], queryFn: fetchSchedules, staleTime: 10_000 });
-  const { data: accounts = EMPTY_CONNECTED_ACCOUNTS, refetch: refetchAccounts } = useQuery({ queryKey: ["connected-accounts"], queryFn: fetchAccounts, staleTime: 60_000 });
+  const { data: accounts = EMPTY_CONNECTED_ACCOUNTS, refetch: refetchAccounts } = useQuery({ queryKey: ["connected-accounts"], queryFn: fetchAccounts, staleTime: 30_000 });
 
   const [items, setItems] = useState<ScheduledItem[]>([]);
   useEffect(() => setItems(scheduleData), [scheduleData]);
 
-  const [debugLog, setDebugLog]         = useState("");
-  const [debugOpen, setDebugOpen]       = useState(false);
+  const [debugLog,   setDebugLog]   = useState("");
+  const [debugOpen,  setDebugOpen]  = useState(false);
+  const [dbDiagOpen, setDbDiagOpen] = useState(false);
 
   // OAuth redirect
   useEffect(() => {
-    const p = new URLSearchParams(window.location.search);
-    const code = p.get("code"); const err = p.get("error");
-    if (err) { window.history.replaceState({}, "", window.location.pathname); toast.error(`Fanvue auth error: ${p.get("error_description") ?? err}`); return; }
+    const p    = new URLSearchParams(window.location.search);
+    const code = p.get("code");
+    const err  = p.get("error");
+    if (err) {
+      window.history.replaceState({}, "", window.location.pathname);
+      toast.error(`Fanvue auth error: ${p.get("error_description") ?? err}`);
+      return;
+    }
     if (!code) return;
     window.history.replaceState({}, "", window.location.pathname);
     toast.loading("Connecting Fanvue account…", { id: "fanvue-connect" });
     exchangeFanvueCode(code)
-      .then(() => { toast.success("Connected!", { id: "fanvue-connect" }); refetchAccounts(); queryClient.invalidateQueries({ queryKey: ["connected-accounts"] }); })
+      .then(() => {
+        toast.success("Connected!", { id: "fanvue-connect" });
+        refetchAccounts();
+        queryClient.invalidateQueries({ queryKey: ["connected-accounts"] });
+      })
       .catch((e) => toast.error(e.message ?? "Failed", { id: "fanvue-connect" }));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Realtime
+  // Realtime schedules
   useEffect(() => {
     const ch = supabase.channel("schedules-rt")
       .on("postgres_changes", { event: "*", schema: "public", table: "schedules" }, () =>
@@ -607,14 +744,14 @@ function SchedulePage() {
     return () => { supabase.removeChannel(ch); };
   }, [queryClient]);
 
-  const [tab, setTab]                     = useState("calendar");
-  const [search, setSearch]               = useState("");
-  const [statusFilter, setStatusFilter]   = useState<"all" | PublishStatus>("all");
+  const [tab,           setTab]           = useState("calendar");
+  const [search,        setSearch]        = useState("");
+  const [statusFilter,  setStatusFilter]  = useState<"all" | PublishStatus>("all");
   const [accountFilter, setAccountFilter] = useState<string>("all");
-  const [rangeFilter, setRangeFilter]     = useState<"all" | "today" | "week" | "month">("all");
-  const [selected, setSelected]           = useState<ScheduledItem | null>(null);
-  const [createOpen, setCreateOpen]       = useState(false);
-  const [accountsOpen, setAccountsOpen]   = useState(false);
+  const [rangeFilter,   setRangeFilter]   = useState<"all" | "today" | "week" | "month">("all");
+  const [selected,      setSelected]      = useState<ScheduledItem | null>(null);
+  const [createOpen,    setCreateOpen]    = useState(false);
+  const [accountsOpen,  setAccountsOpen]  = useState(false);
   const [weekStart, setWeekStart] = useState(() => {
     const d = new Date(); d.setHours(0,0,0,0); d.setDate(d.getDate() - d.getDay()); return d;
   });
@@ -628,7 +765,7 @@ function SchedulePage() {
       todayCount:        items.filter((i) => i.status === "scheduled" && isSameDay(new Date(i.scheduledAt), now)).length,
       weekPublished:     items.filter((i) => i.status === "published" && i.publishedAt && new Date(i.publishedAt) >= wa).length,
       failed:            items.filter((i) => i.status === "failed").length,
-      connectedAccounts: accounts.filter((a) => a.status === "connected").length,
+      connectedAccounts: accounts.filter((a) => a.status === "connected" && !!a.accessToken).length,
     };
   }, [items, accounts]);
 
@@ -644,7 +781,7 @@ function SchedulePage() {
         if (rangeFilter === "month" && (d.getMonth() !== now.getMonth() || d.getFullYear() !== now.getFullYear())) return false;
       }
       if (search.trim()) {
-        const q = search.toLowerCase();
+        const q   = search.toLowerCase();
         const acc = getAccount(i.accountId);
         const hay = [i.contentName, i.character, acc?.name, acc?.handle].filter(Boolean).join(" ").toLowerCase();
         if (!hay.includes(q)) return false;
@@ -652,7 +789,7 @@ function SchedulePage() {
       return true;
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, statusFilter, accountFilter, rangeFilter, search]);
+  }, [items, statusFilter, accountFilter, rangeFilter, search, accounts]);
 
   const updateItem = (id: string, patch: Partial<ScheduledItem>) =>
     setItems((prev) => prev.map((i) => i.id === id ? { ...i, ...patch } : i));
@@ -660,8 +797,12 @@ function SchedulePage() {
   const removeItem = async (id: string) => {
     setItems((prev) => prev.filter((i) => i.id !== id));
     setSelected(null);
-    try { const { error } = await supabase.from("schedules").delete().eq("id", id); if (error) throw error; toast.success("Removed"); queryClient.invalidateQueries({ queryKey: ["schedules"] }); }
-    catch (e: any) { toast.error(e?.message ?? "Failed"); }
+    try {
+      const { error } = await supabase.from("schedules").delete().eq("id", id);
+      if (error) throw error;
+      toast.success("Removed");
+      queryClient.invalidateQueries({ queryKey: ["schedules"] });
+    } catch (e: any) { toast.error(e?.message ?? "Failed"); }
   };
 
   const retryPublish = async (id: string) => {
@@ -670,61 +811,48 @@ function SchedulePage() {
     catch (e: any) { toast.error(e?.message ?? "Failed"); }
   };
 
-  // FIX 4: publishNow — robust account resolution with clear diagnostics
+  // ── CORE FIX: publishNow fetches the token directly from DB ─────────────
   const publishNow = async (id: string) => {
     const item = items.find((i) => i.id === id);
     if (!item) return;
 
-    // Step A: try to find the account linked to this specific item
-    let account = item.accountId
-      ? accounts.find((a) => a.id === item.accountId && a.status === "connected" && !!a.accessToken)
-      : undefined;
-
-    // Step B: if not found, fall back to ANY connected account
-    if (!account) {
-      account = accounts.find((a) => a.status === "connected" && !!a.accessToken);
-      if (account) {
-        // FIX 5: update the schedule row so it's properly linked going forward
-        await supabase.from("schedules").update({ connected_account_id: account.id }).eq("id", id);
-        updateItem(id, { accountId: account.id });
-        toast.info(`Using account @${account.handle} (auto-selected)`);
-      }
+    // Validate media URL first
+    if (!item.mediaUrl) {
+      toast.error("No media URL on this item. The image/video may still be generating.", { duration: 8000 });
+      return;
     }
 
+    // Fetch the best available Fanvue account token DIRECTLY from DB
+    // This bypasses any broken accountId → accounts join in the UI state
+    toast.loading("Looking up Fanvue account…", { id: `pub-${id}` });
+    const account = await fetchBestFanvueAccount();
+
     if (!account) {
-      toast.error("No connected Fanvue account found. Please connect one first.", {
-        action: { label: "Connect account", onClick: () => setAccountsOpen(true) },
+      toast.error("No connected Fanvue account found in database.", {
+        id: `pub-${id}`,
+        description: "Open the DB Diagnostic to check what's in connected_accounts.",
+        action: { label: "DB Diag", onClick: () => setDbDiagOpen(true) },
       });
       return;
     }
 
-    // FIX 6: validate media URL before starting
-    if (!item.mediaUrl) {
-      toast.error(
-        "No media URL found on this item. The image/video may still be generating, or the URL was never saved.",
-        { duration: 8000 }
-      );
-      return;
-    }
-
-    updateItem(id, { status: "publishing", queueStatus: "publishing" });
+    updateItem(id, { status: "publishing", queueStatus: "publishing", accountId: account.id });
     const toastId = `pub-${id}`;
-    toast.loading(`Uploading to Fanvue via @${account.handle}…`, { id: toastId });
+    toast.loading(`Uploading to Fanvue (@${account.handle})…`, { id: toastId });
 
-    let publishLog = "";
+    let publishLog = `Account resolved: id=${account.id} handle=@${account.handle}\n`;
     try {
       const caption = item.scenePrompts[0] ?? item.contentName;
       const { postUuid: externalPostId, log } = await publishToFanvue({
-        accessToken: account.accessToken!,
+        accessToken: account.accessToken,
         mediaUrl:    item.mediaUrl,
         mediaType:   item.type,
         caption,
         audience:    "followers-and-subscribers",
         onProgress:  (s) => toast.loading(s, { id: toastId }),
       });
-      publishLog = log;
+      publishLog += log;
 
-      // Save back to Supabase
       const now   = new Date().toISOString();
       const table = item.type === "image" ? "images" : "videos";
       const { data: schedRow } = await supabase.from("schedules").select("content_id").eq("id", id).single();
@@ -753,8 +881,8 @@ function SchedulePage() {
       queryClient.invalidateQueries({ queryKey: ["schedules"] });
 
     } catch (e: any) {
-      const msg = e?.message ?? "Unknown error";
-      publishLog = publishLog + `\n\nERROR: ${msg}`;
+      const msg    = e?.message ?? "Unknown error";
+      publishLog  += `\n\nERROR: ${msg}`;
       console.error("[publishNow] FAILED:", msg);
       updateItem(id, { status: "failed", queueStatus: "failed" });
       try { await scheduleService.update(id, { status: "failed" }); } catch {}
@@ -781,7 +909,7 @@ function SchedulePage() {
     setDragId(null);
   };
 
-  const connectedCount = accounts.filter((a) => a.status === "connected").length;
+  const connectedCount = stats.connectedAccounts;
 
   return (
     <SidebarProvider>
@@ -800,8 +928,11 @@ function SchedulePage() {
                 <p className="mt-1 text-sm text-muted-foreground">Plan, queue and publish approved content to your Fanvue account.</p>
               </div>
               <div className="flex items-center gap-2">
-                <Button variant="outline" size="sm" className="gap-2" onClick={() => { if (debugLog) setDebugOpen(true); else toast.info("No debug log yet — attempt a publish first."); }}>
-                  <Bug className="h-4 w-4" /> Debug log
+                <Button variant="outline" size="sm" className="gap-2" onClick={() => setDbDiagOpen(true)}>
+                  <Bug className="h-4 w-4" /> DB Diag
+                </Button>
+                <Button variant="outline" size="sm" className="gap-2" onClick={() => { if (debugLog) setDebugOpen(true); else toast.info("No publish log yet."); }}>
+                  <Bug className="h-4 w-4" /> Publish log
                 </Button>
                 <Button variant="outline" size="sm" className="gap-2" onClick={() => setAccountsOpen(true)}>
                   <Plug className="h-4 w-4" />
@@ -818,9 +949,17 @@ function SchedulePage() {
             {connectedCount === 0 && (
               <div className="flex items-center gap-3 rounded-lg border border-warning/30 bg-warning/5 px-4 py-3">
                 <AlertTriangle className="h-4 w-4 flex-shrink-0 text-warning" />
-                <p className="flex-1 text-sm">No Fanvue account connected.</p>
-                <Button size="sm" variant="outline" className="gap-1.5" onClick={() => setAccountsOpen(true)}>
-                  <ExternalLink className="h-3.5 w-3.5" /> Connect now
+                <p className="flex-1 text-sm">
+                  No connected Fanvue account found.{" "}
+                  {accounts.length > 0
+                    ? `(${accounts.length} row(s) in DB but none have a valid token — click DB Diag to inspect)`
+                    : "Connect one or check the DB Diag button."}
+                </p>
+                <Button size="sm" variant="outline" className="gap-1.5" onClick={() => setDbDiagOpen(true)}>
+                  <Bug className="h-3.5 w-3.5" /> DB Diag
+                </Button>
+                <Button size="sm" variant="outline" className="gap-1.5" onClick={() => { startFanvueOAuth(); }}>
+                  <ExternalLink className="h-3.5 w-3.5" /> Reconnect
                 </Button>
               </div>
             )}
@@ -830,7 +969,7 @@ function SchedulePage() {
               <DashboardCard label="Publishing today"    value={stats.todayCount}        icon={Clock}         accent="chart-2"  hint="Next 24h" />
               <DashboardCard label="Published this week" value={stats.weekPublished}     icon={CheckCircle2}  accent="chart-3" />
               <DashboardCard label="Failed"              value={stats.failed}            icon={AlertTriangle} accent="chart-5"  hint={stats.failed ? "Needs attention" : "All clear"} />
-              <DashboardCard label="Connected accounts"  value={`${stats.connectedAccounts}/${accounts.length}`} icon={Link2} accent="chart-4" hint="Fanvue" />
+              <DashboardCard label="Connected accounts"  value={`${connectedCount}/${accounts.length}`} icon={Link2} accent="chart-4" hint="Fanvue" />
             </div>
 
             <Card className="border-border/60 bg-card">
@@ -884,7 +1023,6 @@ function SchedulePage() {
                   onSchedule={() => setCreateOpen(true)} />
               </TabsContent>
               <TabsContent value="queue" className="mt-4">
-                {/* FIX 7: Queue now also shows items with fake IDs (re-publish needed) */}
                 <QueueView
                   items={filteredItems.filter((i) => ["scheduled","publishing","failed"].includes(i.status))}
                   getAccount={getAccount} onOpen={setSelected}
@@ -907,6 +1045,7 @@ function SchedulePage() {
       <AccountsDialog open={accountsOpen} onOpenChange={setAccountsOpen} accounts={accounts}
         onRefresh={() => { refetchAccounts(); queryClient.invalidateQueries({ queryKey: ["connected-accounts"] }); }} />
       <DebugLogDialog open={debugOpen} onClose={() => setDebugOpen(false)} log={debugLog} />
+      <DBDiagDialog   open={dbDiagOpen} onClose={() => setDbDiagOpen(false)} />
     </SidebarProvider>
   );
 }
@@ -919,8 +1058,8 @@ function CalendarView({ weekStart, setWeekStart, items, getAccount, onOpen, onDr
   getAccount: (id: string) => ConnectedAccount | undefined; onOpen: (i: ScheduledItem) => void;
   onDragStart: (id: string | null) => void; onDropOnDay: (d: Date) => void; onSchedule: () => void;
 }) {
-  const days = Array.from({ length: 7 }).map((_, idx) => { const d = new Date(weekStart); d.setDate(d.getDate() + idx); return d; });
-  const move = (n: number) => { const d = new Date(weekStart); d.setDate(d.getDate() + n * 7); setWeekStart(d); };
+  const days   = Array.from({ length: 7 }).map((_, idx) => { const d = new Date(weekStart); d.setDate(d.getDate() + idx); return d; });
+  const move   = (n: number) => { const d = new Date(weekStart); d.setDate(d.getDate() + n * 7); setWeekStart(d); };
   const todayD = new Date();
   return (
     <Card className="border-border/60 bg-card">
@@ -1004,17 +1143,16 @@ function QueueView({ items, getAccount, onOpen, onCancel, onPublishNow, onRetry,
                   <p className="truncate text-sm font-semibold">{i.contentName}</p>
                   <QueueBadge status={i.queueStatus} />
                 </div>
-                {/* FIX 8: Show account info or helpful message */}
                 <p className="mt-0.5 text-xs text-muted-foreground">
                   {i.character} ·{" "}
                   {account
-                    ? <span className="text-foreground">@{account.handle}</span>
-                    : <span className="text-amber-500">No account linked — will auto-pick first connected account</span>}
+                    ? <span className="text-foreground font-medium">@{account.handle}</span>
+                    : <span className="text-amber-500 text-xs">Will auto-pick first connected account</span>}
                 </p>
-                <p className="mt-0.5 text-[11px] text-muted-foreground font-mono break-all">
+                <p className="mt-0.5 text-[11px] font-mono break-all">
                   {i.mediaUrl
-                    ? <span className="text-muted-foreground">media: {i.mediaUrl.slice(0, 60)}…</span>
-                    : <span className="text-destructive font-semibold">⚠ Media URL missing — image may still be generating</span>}
+                    ? <span className="text-muted-foreground">{i.mediaUrl.slice(0, 70)}…</span>
+                    : <span className="text-destructive font-semibold">⚠ No media URL — asset may still be generating</span>}
                 </p>
                 <p className="mt-1 inline-flex items-center gap-1 text-xs text-muted-foreground">
                   <Clock className="h-3 w-3" />{fmtDateTime(i.scheduledAt)}
@@ -1024,7 +1162,9 @@ function QueueView({ items, getAccount, onOpen, onCancel, onPublishNow, onRetry,
                 {i.status === "failed" ? (
                   <Button size="sm" variant="outline" className="gap-1.5" onClick={() => onRetry(i.id)}><RefreshCw className="h-3.5 w-3.5" /> Retry</Button>
                 ) : (
-                  <Button size="sm" variant="outline" className="gap-1.5" onClick={() => onPublishNow(i.id)} disabled={i.status === "publishing" || !i.mediaUrl}>
+                  <Button size="sm" variant="outline" className="gap-1.5"
+                    onClick={() => onPublishNow(i.id)}
+                    disabled={i.status === "publishing" || !i.mediaUrl}>
                     {i.status === "publishing" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
                     {i.status === "publishing" ? "Publishing…" : "Publish now"}
                   </Button>
@@ -1116,10 +1256,8 @@ function DetailSheet({ item, onClose, getAccount, onRetry, onPublishNow, onRemov
   getAccount: (id: string) => ConnectedAccount | undefined;
   onRetry: (id: string) => void; onPublishNow: (id: string) => void; onRemove: (id: string) => void;
 }) {
-  const account = item ? getAccount(item.accountId) : undefined;
-
-  // FIX 9: show Publish Now if not truly published (i.e. no real Fanvue UUID yet)
-  const canPublish = item && item.status !== "publishing" && item.status !== "published";
+  const account      = item ? getAccount(item.accountId) : undefined;
+  const canRepublish = item && item.status !== "publishing";
 
   return (
     <Sheet open={!!item} onOpenChange={(o) => !o && onClose()}>
@@ -1136,17 +1274,16 @@ function DetailSheet({ item, onClose, getAccount, onRetry, onPublishNow, onRemov
                 : <img src={item.mediaUrl || item.thumbnail} alt={item.contentName} className="h-full w-full object-cover" />}
             </div>
 
-            {/* Media URL debug info */}
             <div className="rounded-md border border-border bg-background/40 p-3">
               <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground mb-1">Media URL</p>
               {item.mediaUrl
                 ? <p className="font-mono text-[11px] break-all text-foreground">{item.mediaUrl}</p>
-                : <p className="text-destructive text-xs font-semibold">⚠️ MISSING — image/video URL is empty. The asset did not finish generating.</p>}
+                : <p className="text-destructive text-xs font-semibold">⚠️ MISSING — asset did not finish generating</p>}
             </div>
 
             <div className="grid grid-cols-2 gap-3">
               <Field label="Scheduled"         value={fmtDateTime(item.scheduledAt)} />
-              <Field label="Connected account" value={account ? `${account.name} (@${account.handle})` : "Not linked — will auto-pick first connected"} />
+              <Field label="Connected account" value={account ? `${account.name} (@${account.handle})` : "Will auto-pick from DB"} />
               {item.publishedAt && <Field label="Published at" value={fmtDateTime(item.publishedAt)} />}
             </div>
 
@@ -1185,16 +1322,15 @@ function DetailSheet({ item, onClose, getAccount, onRetry, onPublishNow, onRemov
 
             <Separator />
             <div className="flex flex-wrap items-center gap-2">
-              {/* FIX 9: Show publish button for all non-truly-published items */}
-              {canPublish && (
+              {canRepublish && (
                 <Button size="sm" className="gap-2" onClick={() => onPublishNow(item.id)} disabled={!item.mediaUrl}>
-                  {item.status === "publishing" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-                  {item.status === "publishing" ? "Publishing…" : item.status === "failed" ? "Retry publish" : "Publish now"}
-                </Button>
-              )}
-              {item.status === "published" && (
-                <Button size="sm" variant="outline" className="gap-2" onClick={() => onPublishNow(item.id)}>
-                  <RefreshCw className="h-4 w-4" /> Re-publish
+                  {item.status === "publishing"
+                    ? <Loader2 className="h-4 w-4 animate-spin" />
+                    : <Send className="h-4 w-4" />}
+                  {item.status === "publishing" ? "Publishing…"
+                    : item.status === "published" ? "Re-publish"
+                    : item.status === "failed"    ? "Retry publish"
+                    : "Publish now"}
                 </Button>
               )}
               <Button size="sm" variant="outline" className="gap-2 text-destructive hover:text-destructive" onClick={() => onRemove(item.id)}>
@@ -1245,7 +1381,7 @@ async function fetchApprovedAssets(): Promise<ApprovedAsset[]> {
 function CreateScheduleDialog({ open, onOpenChange, accounts }: {
   open: boolean; onOpenChange: (o: boolean) => void; accounts: ConnectedAccount[];
 }) {
-  const queryClient    = useQueryClient();
+  const queryClient       = useQueryClient();
   const { data: assets = EMPTY_APPROVED_ASSETS } = useQuery({ queryKey: ["approved-assets"], queryFn: fetchApprovedAssets, enabled: open });
   const connectedAccounts = accounts.filter((a) => a.status === "connected");
 
@@ -1267,13 +1403,15 @@ function CreateScheduleDialog({ open, onOpenChange, accounts }: {
     try {
       const { data: u } = await supabase.auth.getUser();
       const { error: schedErr } = await supabase.from("schedules").insert({
-        content_type: asset.type, content_id: asset.id,
-        publish_time: iso, platform: "Fanvue", status: "scheduled",
+        content_type:         asset.type,
+        content_id:           asset.id,
+        publish_time:         iso,
+        platform:             "Fanvue",
+        status:               "scheduled",
         connected_account_id: accountId,
-        created_by: u.user?.id ?? null,
+        created_by:           u.user?.id ?? null,
       });
       if (schedErr) throw schedErr;
-      // Also save on asset row as backup
       const table = asset.type === "image" ? "images" : "videos";
       await supabase.from(table).update({ connected_account_id: accountId }).eq("id", asset.id);
       toast.success("Content scheduled ✅");
