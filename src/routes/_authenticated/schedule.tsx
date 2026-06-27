@@ -1,3 +1,5 @@
+
+
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -8,7 +10,7 @@ import {
   Image as ImageIcon, Video as VideoIcon, Play, ArrowLeft, Send,
   Filter, Inbox, ChevronLeft, ChevronRight, MoreHorizontal,
   Trash2, Eye, RefreshCw, Link2, AlertTriangle,
-  Loader2, Plug, CheckCircle, XCircle, ExternalLink,
+  Loader2, Plug, CheckCircle, XCircle, ExternalLink, Bug,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -58,14 +60,27 @@ const fanvueHeaders = (token: string, extra?: Record<string, string>) => ({
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PKCE OAuth helpers
+// Debug logger — collects a full trace and shows it in the UI on failure
+// ─────────────────────────────────────────────────────────────────────────────
+class PublishLogger {
+  lines: string[] = [];
+  log(msg: string) {
+    const ts = new Date().toISOString().slice(11, 23);
+    const line = `[${ts}] ${msg}`;
+    console.info("[publishToFanvue]", msg);
+    this.lines.push(line);
+  }
+  dump() { return this.lines.join("\n"); }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PKCE OAuth
 // ─────────────────────────────────────────────────────────────────────────────
 function b64url(buf: ArrayBuffer) {
   let s = "";
   for (const b of new Uint8Array(buf)) s += String.fromCharCode(b);
   return btoa(s).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
 }
-
 async function generatePKCE() {
   const arr = new Uint8Array(32);
   crypto.getRandomValues(arr);
@@ -73,7 +88,6 @@ async function generatePKCE() {
   const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
   return { verifier, challenge };
 }
-
 const PKCE_KEY  = "fanvue_pkce_verifier";
 const STATE_KEY = "fanvue_oauth_state";
 
@@ -86,8 +100,7 @@ async function startFanvueOAuth() {
     client_id:             FANVUE_CLIENT_ID,
     redirect_uri:          FANVUE_REDIRECT_URI,
     response_type:         "code",
-    // ── SCOPES: must include write:media AND write:post ──────────────────────
-    scope: "openid offline_access read:self read:media write:media write:post",
+    scope:                 "openid offline_access read:self read:media write:media write:post",
     state,
     code_challenge:        challenge,
     code_challenge_method: "S256",
@@ -97,7 +110,7 @@ async function startFanvueOAuth() {
 
 async function exchangeFanvueCode(code: string): Promise<void> {
   const verifier = sessionStorage.getItem(PKCE_KEY);
-  if (!verifier) throw new Error("PKCE verifier missing — please try connecting again");
+  if (!verifier) throw new Error("PKCE verifier missing — reconnect please");
   sessionStorage.removeItem(PKCE_KEY);
   sessionStorage.removeItem(STATE_KEY);
 
@@ -105,267 +118,217 @@ async function exchangeFanvueCode(code: string): Promise<void> {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
-      grant_type:    "authorization_code",
-      code,
-      redirect_uri:  FANVUE_REDIRECT_URI,
-      client_id:     FANVUE_CLIENT_ID,
-      client_secret: FANVUE_CLIENT_SECRET,
+      grant_type: "authorization_code", code,
+      redirect_uri: FANVUE_REDIRECT_URI,
+      client_id: FANVUE_CLIENT_ID, client_secret: FANVUE_CLIENT_SECRET,
       code_verifier: verifier,
     }).toString(),
   });
   if (!res.ok) throw new Error(`Token exchange failed: ${await res.text()}`);
+  const tokens = await res.json();
 
-  const tokens      = await res.json();
   const accessToken  = tokens.access_token  as string;
   const refreshToken = tokens.refresh_token as string | undefined;
   const expiresIn    = tokens.expires_in    as number | undefined;
 
-  // GET /users/me — correct endpoint per Fanvue API docs
-  const profileRes = await fetch(`${FANVUE_API_BASE}/users/me`, {
-    headers: fanvueHeaders(accessToken),
-  });
-  const profile = profileRes.ok ? await profileRes.json() : {};
-  console.info("[OAuth] /users/me →", JSON.stringify(profile));
+  const profileRes = await fetch(`${FANVUE_API_BASE}/users/me`, { headers: fanvueHeaders(accessToken) });
+  const profile    = profileRes.ok ? await profileRes.json() : {};
 
-  const handle = profile.handle      ?? profile.uuid ?? "fanvue-user";
+  const handle = profile.handle ?? profile.uuid ?? "fanvue-user";
   const name   = profile.displayName ?? handle;
 
   const { data: u } = await supabase.auth.getUser();
   const { error } = await supabase.from("connected_accounts").upsert({
-    account_name:        name,
-    external_account_id: handle,
-    platform:            "fanvue",
-    connection_status:   "connected",
-    access_token:        accessToken,
-    refresh_token:       refreshToken ?? null,
-    token_expires_at:    expiresIn
-      ? new Date(Date.now() + expiresIn * 1000).toISOString()
-      : null,
+    account_name: name, external_account_id: handle,
+    platform: "fanvue", connection_status: "connected",
+    access_token: accessToken, refresh_token: refreshToken ?? null,
+    token_expires_at: expiresIn ? new Date(Date.now() + expiresIn * 1000).toISOString() : null,
     created_by: u.user?.id ?? null,
   }, { onConflict: "external_account_id" });
   if (error) throw new Error(`Failed to save account: ${error.message}`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Fanvue publish pipeline — verified against official API docs
-//
-// Endpoints used (all confirmed in OpenAPI spec):
-//   POST   /media/uploads                              → create session
-//   GET    /media/uploads/{uploadId}/parts/{n}/url     → presigned S3 URL (text/plain)
-//   PUT    {presignedUrl}                              → upload to S3 directly
-//   PATCH  /media/uploads/{uploadId}                  → complete session
-//   GET    /media/{uuid}                               → poll status
-//   POST   /posts                                      → create post (returns 201)
+// Fanvue publish pipeline  — every step throws on failure, NO silent fallbacks
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Download image/video blob.
- * 1st attempt: direct fetch (works if Supabase bucket is public)
- * 2nd attempt: /api/proxy-image Vercel route (bypasses CORS for CloudFront)
- */
-async function fetchMediaBlob(url: string): Promise<Blob> {
-  console.info("[publish] Fetching media:", url);
+async function fetchMediaBlob(url: string, log: PublishLogger): Promise<Blob> {
+  log.log(`Fetching media: ${url}`);
   let res = await fetch(url);
+  log.log(`Direct fetch → ${res.status} ${res.statusText}, type=${res.headers.get("content-type")}`);
   if (!res.ok) {
-    console.warn(`[publish] Direct fetch failed (${res.status}), trying proxy…`);
+    log.log("Direct fetch failed, trying /api/proxy-image…");
     res = await fetch(`/api/proxy-image?url=${encodeURIComponent(url)}`);
+    log.log(`Proxy fetch → ${res.status} ${res.statusText}`);
   }
   if (!res.ok) throw new Error(
     `Cannot download media (${res.status}). ` +
-    `Make sure your Supabase bucket is public OR /api/proxy-image is deployed.`
+    `Ensure your Supabase storage bucket is PUBLIC, or deploy /api/proxy-image on Vercel.`
   );
   const blob = await res.blob();
-  if (blob.size === 0) throw new Error("Media file is empty — check storage.");
-  console.info(`[publish] Got ${(blob.size / 1024).toFixed(0)} KB, type: ${blob.type}`);
+  log.log(`Blob: size=${blob.size} bytes, type="${blob.type}"`);
+  if (blob.size === 0) throw new Error("Downloaded blob is 0 bytes — file is missing or bucket is private.");
   return blob;
 }
 
-/** Step 1 — POST /media/uploads → { mediaUuid, uploadId } */
-async function step1_createSession(
-  token: string, filename: string, mediaType: "image" | "video"
-) {
-  console.info(`[Step 1] Creating upload session for "${filename}" (${mediaType})`);
-  const res = await fetch(`${FANVUE_API_BASE}/media/uploads`, {
+async function step1_createSession(token: string, filename: string, mediaType: "image" | "video", log: PublishLogger) {
+  log.log(`Step 1 — POST /media/uploads  name="${filename}" mediaType="${mediaType}"`);
+  const res  = await fetch(`${FANVUE_API_BASE}/media/uploads`, {
     method: "POST",
     headers: fanvueHeaders(token, { "Content-Type": "application/json" }),
     body: JSON.stringify({ name: filename, filename, mediaType }),
   });
   const text = await res.text();
-  console.info(`[Step 1] ${res.status}:`, text);
-  if (!res.ok) throw new Error(`[Step 1] Create session failed (${res.status}): ${text}`);
+  log.log(`Step 1 → ${res.status}: ${text}`);
+  if (!res.ok) throw new Error(`Step 1 failed (${res.status}): ${text}`);
   const data = JSON.parse(text);
   if (!data.mediaUuid || !data.uploadId)
-    throw new Error(`[Step 1] Unexpected response (missing mediaUuid/uploadId): ${text}`);
+    throw new Error(`Step 1: missing mediaUuid/uploadId in response: ${text}`);
+  log.log(`Step 1 ✅  mediaUuid=${data.mediaUuid}  uploadId=${data.uploadId}`);
   return data as { mediaUuid: string; uploadId: string };
 }
 
-/**
- * Step 2a — GET /media/uploads/{uploadId}/parts/{partNumber}/url
- * Returns a presigned S3 URL as text/plain (confirmed in OpenAPI spec)
- */
-async function step2a_getPresignedUrl(
-  token: string, uploadId: string, partNumber: number
-) {
-  const endpoint = `${FANVUE_API_BASE}/media/uploads/${uploadId}/parts/${partNumber}/url`;
-  console.info(`[Step 2a] GET ${endpoint}`);
-  const res  = await fetch(endpoint, { headers: fanvueHeaders(token) });
+async function step2a_getPresignedUrl(token: string, uploadId: string, partNumber: number, log: PublishLogger) {
+  const url = `${FANVUE_API_BASE}/media/uploads/${uploadId}/parts/${partNumber}/url`;
+  log.log(`Step 2a — GET ${url}`);
+  const res  = await fetch(url, { headers: fanvueHeaders(token) });
   const text = (await res.text()).trim();
-  console.info(`[Step 2a] ${res.status}: "${text.slice(0, 100)}…"`);
-  if (!res.ok) throw new Error(`[Step 2a] Get presigned URL failed (${res.status}): ${text}`);
+  log.log(`Step 2a → ${res.status}: "${text.slice(0, 120)}"`);
+  if (!res.ok) throw new Error(`Step 2a failed (${res.status}): ${text}`);
   if (!text.startsWith("https://"))
-    throw new Error(`[Step 2a] Expected a presigned URL, got: "${text.slice(0, 200)}"`);
-  return text; // raw S3 presigned URL
+    throw new Error(`Step 2a: response is not a URL — got: "${text.slice(0, 200)}"`);
+  log.log(`Step 2a ✅  presigned URL obtained`);
+  return text;
 }
 
-/** Step 2b — PUT blob to S3 presigned URL, returns ETag */
-async function step2b_uploadToS3(presignedUrl: string, blob: Blob) {
-  console.info(`[Step 2b] Uploading ${blob.size} bytes to S3…`);
+async function step2b_uploadToS3(presignedUrl: string, blob: Blob, log: PublishLogger) {
+  log.log(`Step 2b — PUT ${blob.size} bytes to S3`);
   const res  = await fetch(presignedUrl, { method: "PUT", body: blob });
-  // S3 returns ETag with surrounding quotes — strip them
   const etag = (res.headers.get("ETag") ?? res.headers.get("etag") ?? "").replace(/"/g, "");
-  console.info(`[Step 2b] ${res.status}, ETag: "${etag}"`);
-  if (!res.ok) throw new Error(`[Step 2b] S3 upload failed (${res.status}): ${await res.text()}`);
-  if (!etag)   throw new Error("[Step 2b] S3 returned no ETag — upload may have failed silently");
+  log.log(`Step 2b → ${res.status}, ETag="${etag}"`);
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`Step 2b S3 upload failed (${res.status}): ${t}`);
+  }
+  if (!etag) throw new Error("Step 2b: S3 returned no ETag — upload may have failed silently");
+  log.log(`Step 2b ✅  uploaded, ETag=${etag}`);
   return etag;
 }
 
-/** Step 3 — PATCH /media/uploads/{uploadId} to complete the multipart session */
-async function step3_completeUpload(
-  token: string, uploadId: string, parts: { PartNumber: number; ETag: string }[]
-) {
-  console.info(`[Step 3] Completing upload for uploadId=${uploadId}`);
+async function step3_completeUpload(token: string, uploadId: string, parts: { PartNumber: number; ETag: string }[], log: PublishLogger) {
+  log.log(`Step 3 — PATCH /media/uploads/${uploadId}  parts=${JSON.stringify(parts)}`);
   const res  = await fetch(`${FANVUE_API_BASE}/media/uploads/${uploadId}`, {
     method: "PATCH",
     headers: fanvueHeaders(token, { "Content-Type": "application/json" }),
     body: JSON.stringify({ parts }),
   });
   const text = await res.text();
-  console.info(`[Step 3] ${res.status}:`, text);
-  if (!res.ok) throw new Error(`[Step 3] Complete upload failed (${res.status}): ${text}`);
-  // Response: { status: "created" | "processing" | "ready" | "error" }
-  console.info(`[Step 3] Upload complete, media status from response: ${text}`);
+  log.log(`Step 3 → ${res.status}: ${text}`);
+  if (!res.ok) throw new Error(`Step 3 failed (${res.status}): ${text}`);
+  log.log(`Step 3 ✅  upload session completed`);
 }
 
-/**
- * Step 4 — Poll GET /media/{uuid} until status === "ready"
- * Per API docs: status values are "created" | "processing" | "ready" | "error"
- * For media not yet FINALISED, only uuid and status are returned.
- */
-async function step4_waitUntilReady(
-  token: string, mediaUuid: string, onProgress?: (s: string) => void
-) {
-  const TIMEOUT = 120_000; // 2 minutes
-  const POLL    =   3_000; // poll every 3 seconds
+async function step4_waitUntilReady(token: string, mediaUuid: string, log: PublishLogger, onProgress?: (s: string) => void) {
+  const TIMEOUT = 120_000;
+  const POLL    =   3_000;
   const start   = Date.now();
   let   attempt = 0;
-  console.info(`[Step 4] Polling /media/${mediaUuid}…`);
+  log.log(`Step 4 — polling /media/${mediaUuid} until status=ready`);
 
   while (Date.now() - start < TIMEOUT) {
     attempt++;
-    const res  = await fetch(`${FANVUE_API_BASE}/media/${mediaUuid}`, {
-      headers: fanvueHeaders(token),
-    });
+    const res  = await fetch(`${FANVUE_API_BASE}/media/${mediaUuid}`, { headers: fanvueHeaders(token) });
     const text = await res.text();
-    console.info(`[Step 4] attempt ${attempt}, ${res.status}:`, text);
+    log.log(`Step 4 attempt ${attempt} → ${res.status}: ${text}`);
 
     if (res.status === 404) {
-      // 404 can occur briefly right after upload — keep polling
       await new Promise(r => setTimeout(r, POLL));
       continue;
     }
-    if (!res.ok) throw new Error(`[Step 4] Poll failed (${res.status}): ${text}`);
+    if (!res.ok) throw new Error(`Step 4 poll failed (${res.status}): ${text}`);
 
     const data   = JSON.parse(text);
     const status = (data.status ?? "").toLowerCase();
-    onProgress?.(`Processing… status: ${status} (${attempt} checks)`);
-    console.info(`[Step 4] media.status = "${status}"`);
+    onProgress?.(`Processing media… status: ${status} (${attempt} checks, ${Math.round((Date.now() - start) / 1000)}s)`);
 
-    if (status === "ready") return;  // ✅ good to go
+    if (status === "ready") { log.log(`Step 4 ✅  media is ready`); return; }
     if (status === "error") throw new Error(
-      "[Step 4] Fanvue rejected the media. " +
-      "Images must be JPEG or PNG; videos must be MP4 (H.264)."
+      `Step 4: Fanvue rejected the media (status=error). ` +
+      `Images must be JPEG/PNG; videos must be MP4 (H.264). Response: ${text}`
     );
-    // "created" or "processing" → keep waiting
     await new Promise(r => setTimeout(r, POLL));
   }
-  throw new Error("[Step 4] Timed out waiting for media (120s). File may be too large.");
+  throw new Error(`Step 4: timed out after 120s. Media UUID: ${mediaUuid}`);
 }
 
-/**
- * Step 5 — POST /posts → returns post UUID
- * Required scope: write:post
- * Response: 201 with { uuid, createdAt, text, price, audience, publishAt, publishedAt, expiresAt }
- */
-async function step5_createPost(
-  token: string, mediaUuid: string, caption: string,
-  audience: "subscribers" | "followers-and-subscribers"
-) {
+async function step5_createPost(token: string, mediaUuid: string, caption: string, audience: "subscribers" | "followers-and-subscribers", log: PublishLogger) {
   const body = { text: caption, mediaUuids: [mediaUuid], audience };
-  console.info("[Step 5] POST /posts:", JSON.stringify(body));
-
+  log.log(`Step 5 — POST /posts  body=${JSON.stringify(body)}`);
   const res  = await fetch(`${FANVUE_API_BASE}/posts`, {
     method: "POST",
     headers: fanvueHeaders(token, { "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
   const text = await res.text();
-  console.info(`[Step 5] ${res.status}:`, text);
-
-  // POST /posts returns 201 on success
-  if (!res.ok) throw new Error(`[Step 5] Create post failed (${res.status}): ${text}`);
-
+  log.log(`Step 5 → ${res.status}: ${text}`);
+  if (!res.ok) throw new Error(`Step 5 failed (${res.status}): ${text}`);
   let data: any;
-  try { data = JSON.parse(text); }
-  catch { throw new Error(`[Step 5] Non-JSON response: ${text.slice(0, 300)}`); }
-
-  // Response field is "uuid" per API docs
+  try { data = JSON.parse(text); } catch { throw new Error(`Step 5: non-JSON response: ${text.slice(0, 300)}`); }
   const postUuid = data.uuid ?? null;
-  if (!postUuid) throw new Error(`[Step 5] No post UUID in response: ${text.slice(0, 300)}`);
+  if (!postUuid) throw new Error(`Step 5: no UUID in response: ${text.slice(0, 300)}`);
+  log.log(`Step 5 ✅  post created, UUID=${postUuid}`);
   return postUuid as string;
 }
 
-/** Full orchestrated publish pipeline */
 async function publishToFanvue(params: {
-  accessToken: string;
-  mediaUrl:    string;
-  mediaType:   "image" | "video";
-  caption:     string;
-  audience?:   "subscribers" | "followers-and-subscribers";
+  accessToken: string; mediaUrl: string; mediaType: "image" | "video";
+  caption: string; audience?: "subscribers" | "followers-and-subscribers";
   onProgress?: (s: string) => void;
-}): Promise<string> {
-  const {
-    accessToken, mediaUrl, mediaType, caption,
-    audience = "followers-and-subscribers", onProgress,
-  } = params;
+}): Promise<{ postUuid: string; log: string }> {
+  const { accessToken, mediaUrl, mediaType, caption, audience = "followers-and-subscribers", onProgress } = params;
+  const logger = new PublishLogger();
+  const report = (s: string) => { logger.log(s); onProgress?.(s); };
 
-  const report = (s: string) => { console.info("[publish]", s); onProgress?.(s); };
+  report(`Starting publish: mediaType=${mediaType}, url=${mediaUrl}`);
 
-  report("Downloading media from storage…");
-  const blob     = await fetchMediaBlob(mediaUrl);
-  const sizekb   = (blob.size / 1024).toFixed(0);
+  const blob     = await fetchMediaBlob(mediaUrl, logger);
+  const sizekb   = (blob.size / 1024).toFixed(1);
   const ext      = mediaType === "video" ? "mp4" : "jpeg";
   const filename = `lila-${Date.now()}.${ext}`;
 
-  report("Step 1/5 — Creating Fanvue upload session…");
-  const { mediaUuid, uploadId } = await step1_createSession(accessToken, filename, mediaType);
+  report(`Media ready: ${sizekb} KB`);
 
-  report("Step 2/5 — Getting presigned upload URL…");
-  const presignedUrl = await step2a_getPresignedUrl(accessToken, uploadId, 1);
+  const { mediaUuid, uploadId } = await step1_createSession(accessToken, filename, mediaType, logger);
+  const presignedUrl            = await step2a_getPresignedUrl(accessToken, uploadId, 1, logger);
+  const etag                    = await step2b_uploadToS3(presignedUrl, blob, logger);
+  await step3_completeUpload(accessToken, uploadId, [{ PartNumber: 1, ETag: etag }], logger);
+  await step4_waitUntilReady(accessToken, mediaUuid, logger, onProgress);
+  const postUuid = await step5_createPost(accessToken, mediaUuid, caption, audience, logger);
 
-  report(`Step 2/5 — Uploading ${sizekb} KB to Fanvue storage…`);
-  const etag = await step2b_uploadToS3(presignedUrl, blob);
+  return { postUuid, log: logger.dump() };
+}
 
-  report("Step 3/5 — Finalising upload session…");
-  await step3_completeUpload(accessToken, uploadId, [{ PartNumber: 1, ETag: etag }]);
-
-  report("Step 4/5 — Waiting for Fanvue to process media (up to 2 min)…");
-  await step4_waitUntilReady(accessToken, mediaUuid, onProgress);
-
-  report("Step 5/5 — Creating post on Fanvue…");
-  const postUuid = await step5_createPost(accessToken, mediaUuid, caption, audience);
-
-  report(`✅ Published! Post UUID: ${postUuid}`);
-  return postUuid;
+// ─────────────────────────────────────────────────────────────────────────────
+// Debug log dialog — shows the full publish trace when something goes wrong
+// ─────────────────────────────────────────────────────────────────────────────
+function DebugLogDialog({ open, onClose, log }: { open: boolean; onClose: () => void; log: string }) {
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2"><Bug className="h-4 w-4" /> Publish Debug Log</DialogTitle>
+          <DialogDescription>Full trace of the last publish attempt. Share this to diagnose issues.</DialogDescription>
+        </DialogHeader>
+        <ScrollArea className="h-96 rounded-md border border-border bg-black p-3">
+          <pre className="whitespace-pre-wrap break-all font-mono text-[11px] text-green-400">{log || "No log yet."}</pre>
+        </ScrollArea>
+        <DialogFooter>
+          <Button variant="outline" size="sm" onClick={() => navigator.clipboard.writeText(log)}>Copy log</Button>
+          <Button onClick={onClose}>Close</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -385,12 +348,7 @@ function RouteErrorBoundary({ error, reset }: { error: Error; reset: () => void 
 }
 
 export const Route = createFileRoute("/_authenticated/schedule")({
-  head: () => ({
-    meta: [
-      { title: "Scheduling — Lila Studio" },
-      { name: "description", content: "Schedule and publish approved content to Fanvue." },
-    ],
-  }),
+  head: () => ({ meta: [{ title: "Scheduling — Lila Studio" }] }),
   component: SchedulePage,
   errorComponent: RouteErrorBoundary,
 });
@@ -406,12 +364,10 @@ type ConnectedAccount = {
   id: string; platform: "fanvue"; name: string; handle: string;
   status: "connected" | "disconnected" | "error"; accessToken?: string;
 };
-
 type HistoryEvent = {
   at: string; label: string;
-  kind: "approved" | "scheduled" | "queued" | "publishing" | "published" | "failed" | "retried";
+  kind: "approved"|"scheduled"|"queued"|"publishing"|"published"|"failed"|"retried";
 };
-
 type ScheduledItem = {
   id: string; contentName: string; type: ContentType; character: string;
   thumbnail: string; mediaUrl: string; accountId: string;
@@ -434,8 +390,7 @@ async function fetchAccounts(): Promise<ConnectedAccount[]> {
   return (data ?? []).map((a: any) => ({
     id: a.id, platform: "fanvue", name: a.account_name,
     handle: a.external_account_id ?? "—",
-    status: a.connection_status === "connected" ? "connected"
-      : a.connection_status === "error" ? "error" : "disconnected",
+    status: a.connection_status === "connected" ? "connected" : a.connection_status === "error" ? "error" : "disconnected",
     accessToken: a.access_token ?? undefined,
   }));
 }
@@ -465,10 +420,9 @@ async function fetchSchedules(): Promise<ScheduledItem[]> {
     const isVideo  = r.content_type === "video";
     const src: any = isVideo ? vidMap.get(r.content_id) : imgMap.get(r.content_id);
     const char: any = src?.character_id ? charMap.get(src.character_id) : null;
-    const scenes: string[] = isVideo && Array.isArray(src?.scene_prompts)
-      ? src.scene_prompts : src?.prompt ? [src.prompt] : [];
-    const media = isVideo ? src?.video_url : src?.image_url;
-    const thumb = char?.reference_image_url || media || PLACEHOLDER;
+    const scenes   = isVideo && Array.isArray(src?.scene_prompts) ? src.scene_prompts : src?.prompt ? [src.prompt] : [];
+    const media    = isVideo ? src?.video_url : src?.image_url;
+    const thumb    = char?.reference_image_url || media || PLACEHOLDER;
 
     const status: PublishStatus =
       r.status === "published" ? "published" : r.status === "failed" ? "failed"
@@ -478,7 +432,7 @@ async function fetchSchedules(): Promise<ScheduledItem[]> {
       : status === "publishing" ? "publishing"
       : new Date(r.publish_time) <= new Date() ? "ready" : "waiting";
 
-    // accountId: check schedule row first, then asset row
+    // accountId: schedule row first (most reliable), then asset row
     const accountId = r.connected_account_id ?? src?.connected_account_id ?? "";
 
     return {
@@ -500,20 +454,20 @@ async function fetchSchedules(): Promise<ScheduledItem[]> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Style helpers
+// Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 const statusStyle: Record<PublishStatus, string> = {
-  scheduled:  "bg-chart-2/15 text-chart-2 border-chart-2/30",
+  scheduled: "bg-chart-2/15 text-chart-2 border-chart-2/30",
   publishing: "bg-primary/15 text-primary border-primary/30",
-  published:  "bg-success/15 text-success border-success/30",
-  failed:     "bg-destructive/15 text-destructive border-destructive/30",
+  published: "bg-success/15 text-success border-success/30",
+  failed: "bg-destructive/15 text-destructive border-destructive/30",
 };
 const queueStatusStyle: Record<QueueStatus, string> = {
-  waiting:    "bg-muted text-muted-foreground border-border",
-  ready:      "bg-chart-2/15 text-chart-2 border-chart-2/30",
+  waiting: "bg-muted text-muted-foreground border-border",
+  ready: "bg-chart-2/15 text-chart-2 border-chart-2/30",
   publishing: "bg-primary/15 text-primary border-primary/30",
-  published:  "bg-success/15 text-success border-success/30",
-  failed:     "bg-destructive/15 text-destructive border-destructive/30",
+  published: "bg-success/15 text-success border-success/30",
+  failed: "bg-destructive/15 text-destructive border-destructive/30",
 };
 const fmtTime     = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 const fmtDate     = (iso: string) => new Date(iso).toLocaleDateString([], { month: "short", day: "numeric" });
@@ -524,8 +478,7 @@ const isSameDay   = (a: Date, b: Date) =>
 function StatusBadge({ status }: { status: PublishStatus }) {
   return (
     <span className={cn("inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider", statusStyle[status])}>
-      {status === "publishing" && <Loader2 className="h-2.5 w-2.5 animate-spin" />}
-      {status}
+      {status === "publishing" && <Loader2 className="h-2.5 w-2.5 animate-spin" />}{status}
     </span>
   );
 }
@@ -541,23 +494,19 @@ function QueueBadge({ status }: { status: QueueStatus }) {
 // Accounts dialog
 // ─────────────────────────────────────────────────────────────────────────────
 function AccountsDialog({ open, onOpenChange, accounts, onRefresh }: {
-  open: boolean; onOpenChange: (o: boolean) => void;
-  accounts: ConnectedAccount[]; onRefresh: () => void;
+  open: boolean; onOpenChange: (o: boolean) => void; accounts: ConnectedAccount[]; onRefresh: () => void;
 }) {
   const [disconnecting, setDisconnecting] = useState<string | null>(null);
   const disconnect = async (id: string) => {
     setDisconnecting(id);
     try {
       const { error } = await supabase.from("connected_accounts")
-        .update({ connection_status: "disconnected", access_token: null, refresh_token: null })
-        .eq("id", id);
+        .update({ connection_status: "disconnected", access_token: null, refresh_token: null }).eq("id", id);
       if (error) throw error;
-      toast.success("Account disconnected");
-      onRefresh();
+      toast.success("Account disconnected"); onRefresh();
     } catch (e: any) { toast.error(e?.message ?? "Failed"); }
     finally { setDisconnecting(null); }
   };
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
@@ -574,13 +523,8 @@ function AccountsDialog({ open, onOpenChange, accounts, onRefresh }: {
           ) : accounts.map((a) => (
             <div key={a.id} className="flex items-center justify-between rounded-lg border border-border bg-card p-3">
               <div className="flex items-center gap-3">
-                <div className="grid h-9 w-9 place-items-center rounded-full bg-primary/10 text-primary font-semibold text-sm">
-                  {a.name.slice(0, 1).toUpperCase()}
-                </div>
-                <div>
-                  <p className="text-sm font-medium">{a.name}</p>
-                  <p className="text-xs text-muted-foreground">@{a.handle}</p>
-                </div>
+                <div className="grid h-9 w-9 place-items-center rounded-full bg-primary/10 text-primary font-semibold text-sm">{a.name.slice(0,1).toUpperCase()}</div>
+                <div><p className="text-sm font-medium">{a.name}</p><p className="text-xs text-muted-foreground">@{a.handle}</p></div>
               </div>
               <div className="flex items-center gap-2">
                 {a.status === "connected"
@@ -596,17 +540,14 @@ function AccountsDialog({ open, onOpenChange, accounts, onRefresh }: {
           <div className="rounded-lg border border-border bg-muted/20 p-4">
             <p className="text-xs font-medium mb-1">Connect a new account</p>
             <p className="text-xs text-muted-foreground mb-3">
-              You'll be redirected to Fanvue to authorise. Scopes requested:{" "}
-              <span className="font-mono">read:self read:media write:media write:post</span>
+              Scopes: <span className="font-mono">read:self read:media write:media write:post</span>
             </p>
             <Button className="w-full gap-2" onClick={() => { onOpenChange(false); startFanvueOAuth(); }}>
               <ExternalLink className="h-4 w-4" /> Connect Fanvue Account
             </Button>
           </div>
         </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>Close</Button>
-        </DialogFooter>
+        <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>Close</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   );
@@ -623,35 +564,28 @@ function SchedulePage() {
   const [items, setItems] = useState<ScheduledItem[]>([]);
   useEffect(() => setItems(scheduleData), [scheduleData]);
 
-  // ── OAuth redirect handler ────────────────────────────────────────────────
+  const [debugLog, setDebugLog]         = useState("");
+  const [debugOpen, setDebugOpen]       = useState(false);
+
+  // OAuth redirect
   useEffect(() => {
-    const p    = new URLSearchParams(window.location.search);
-    const code = p.get("code");
-    const err  = p.get("error");
-    if (err) {
-      window.history.replaceState({}, "", window.location.pathname);
-      toast.error(`Fanvue auth error: ${p.get("error_description") ?? err}`);
-      return;
-    }
+    const p = new URLSearchParams(window.location.search);
+    const code = p.get("code"); const err = p.get("error");
+    if (err) { window.history.replaceState({}, "", window.location.pathname); toast.error(`Fanvue auth error: ${p.get("error_description") ?? err}`); return; }
     if (!code) return;
     window.history.replaceState({}, "", window.location.pathname);
     toast.loading("Connecting Fanvue account…", { id: "fanvue-connect" });
     exchangeFanvueCode(code)
-      .then(() => {
-        toast.success("Fanvue account connected!", { id: "fanvue-connect" });
-        refetchAccounts();
-        queryClient.invalidateQueries({ queryKey: ["connected-accounts"] });
-      })
-      .catch((e) => toast.error(e.message ?? "Failed to connect", { id: "fanvue-connect" }));
+      .then(() => { toast.success("Connected!", { id: "fanvue-connect" }); refetchAccounts(); queryClient.invalidateQueries({ queryKey: ["connected-accounts"] }); })
+      .catch((e) => toast.error(e.message ?? "Failed", { id: "fanvue-connect" }));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Realtime schedule updates ─────────────────────────────────────────────
+  // Realtime
   useEffect(() => {
     const ch = supabase.channel("schedules-rt")
       .on("postgres_changes", { event: "*", schema: "public", table: "schedules" }, () =>
-        queryClient.invalidateQueries({ queryKey: ["schedules"] }))
-      .subscribe();
+        queryClient.invalidateQueries({ queryKey: ["schedules"] })).subscribe();
     return () => { supabase.removeChannel(ch); };
   }, [queryClient]);
 
@@ -664,7 +598,7 @@ function SchedulePage() {
   const [createOpen, setCreateOpen]       = useState(false);
   const [accountsOpen, setAccountsOpen]   = useState(false);
   const [weekStart, setWeekStart] = useState(() => {
-    const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - d.getDay()); return d;
+    const d = new Date(); d.setHours(0,0,0,0); d.setDate(d.getDate() - d.getDay()); return d;
   });
 
   const getAccount = (id: string) => accounts.find((a) => a.id === id);
@@ -683,7 +617,7 @@ function SchedulePage() {
   const filteredItems = useMemo(() => {
     const now = new Date();
     return items.filter((i) => {
-      if (statusFilter  !== "all" && i.status    !== statusFilter)  return false;
+      if (statusFilter !== "all"  && i.status    !== statusFilter)  return false;
       if (accountFilter !== "all" && i.accountId !== accountFilter) return false;
       if (rangeFilter !== "all") {
         const d = new Date(i.scheduledAt);
@@ -692,7 +626,7 @@ function SchedulePage() {
         if (rangeFilter === "month" && (d.getMonth() !== now.getMonth() || d.getFullYear() !== now.getFullYear())) return false;
       }
       if (search.trim()) {
-        const q   = search.toLowerCase();
+        const q = search.toLowerCase();
         const acc = getAccount(i.accountId);
         const hay = [i.contentName, i.character, acc?.name, acc?.handle].filter(Boolean).join(" ").toLowerCase();
         if (!hay.includes(q)) return false;
@@ -708,12 +642,8 @@ function SchedulePage() {
   const removeItem = async (id: string) => {
     setItems((prev) => prev.filter((i) => i.id !== id));
     setSelected(null);
-    try {
-      const { error } = await supabase.from("schedules").delete().eq("id", id);
-      if (error) throw error;
-      toast.success("Schedule removed");
-      queryClient.invalidateQueries({ queryKey: ["schedules"] });
-    } catch (e: any) { toast.error(e?.message ?? "Failed"); }
+    try { const { error } = await supabase.from("schedules").delete().eq("id", id); if (error) throw error; toast.success("Removed"); queryClient.invalidateQueries({ queryKey: ["schedules"] }); }
+    catch (e: any) { toast.error(e?.message ?? "Failed"); }
   };
 
   const retryPublish = async (id: string) => {
@@ -726,30 +656,28 @@ function SchedulePage() {
     const item = items.find((i) => i.id === id);
     if (!item) return;
 
-    // ── Resolve account ───────────────────────────────────────────────────────
-    // Priority: the account saved on this item → any connected account
+    // ── Resolve account ─────────────────────────────────────────────────────
     let account = accounts.find((a) => a.id === item.accountId && a.status === "connected" && !!a.accessToken);
     if (!account) account = accounts.find((a) => a.status === "connected" && !!a.accessToken);
     if (!account) {
-      toast.error("No connected Fanvue account found.", {
-        action: { label: "Connect", onClick: () => setAccountsOpen(true) },
-      });
+      toast.error("No connected Fanvue account found.", { action: { label: "Connect", onClick: () => setAccountsOpen(true) } });
       return;
     }
 
-    // ── Validate media URL ────────────────────────────────────────────────────
+    // ── Validate media URL ───────────────────────────────────────────────────
     if (!item.mediaUrl) {
-      toast.error("No media URL — the asset may still be processing in Supabase.");
+      toast.error("No media URL on this item. The image/video may not have finished generating.");
       return;
     }
 
     updateItem(id, { status: "publishing", queueStatus: "publishing" });
     const toastId = `pub-${id}`;
-    toast.loading("Starting publish to Fanvue…", { id: toastId });
+    toast.loading("Starting publish…", { id: toastId });
 
+    let publishLog = "";
     try {
-      const caption        = item.scenePrompts[0] ?? item.contentName;
-      const externalPostId = await publishToFanvue({
+      const caption = item.scenePrompts[0] ?? item.contentName;
+      const { postUuid: externalPostId, log } = await publishToFanvue({
         accessToken: account.accessToken!,
         mediaUrl:    item.mediaUrl,
         mediaType:   item.type,
@@ -757,14 +685,12 @@ function SchedulePage() {
         audience:    "followers-and-subscribers",
         onProgress:  (s) => toast.loading(s, { id: toastId }),
       });
+      publishLog = log;
 
-      // ── Save results back to Supabase ─────────────────────────────────────
+      // ── Save back to Supabase ──────────────────────────────────────────────
       const now   = new Date().toISOString();
       const table = item.type === "image" ? "images" : "videos";
-
-      const { data: schedRow } = await supabase
-        .from("schedules").select("content_id").eq("id", id).single();
-
+      const { data: schedRow } = await supabase.from("schedules").select("content_id").eq("id", id).single();
       if (schedRow?.content_id) {
         await supabase.from(table).update({
           publish_status:       "published",
@@ -773,11 +699,7 @@ function SchedulePage() {
           connected_account_id: account.id,
         }).eq("id", schedRow.content_id);
       }
-
-      // Also update the schedule row itself
-      await supabase.from("schedules")
-        .update({ connected_account_id: account.id, status: "published" })
-        .eq("id", id);
+      await supabase.from("schedules").update({ connected_account_id: account.id, status: "published" }).eq("id", id);
       await scheduleService.update(id, { status: "published" });
 
       updateItem(id, {
@@ -787,23 +709,24 @@ function SchedulePage() {
       });
 
       toast.success(`🎉 Published to @${account.handle}!`, {
-        id: toastId,
+        id: toastId, duration: 12_000,
         description: `Post UUID: ${externalPostId}`,
-        duration: 12_000,
-        action: {
-          label: "View on Fanvue",
-          onClick: () => window.open(`https://www.fanvue.com/post/${externalPostId}`, "_blank"),
-        },
+        action: { label: "View on Fanvue", onClick: () => window.open(`https://www.fanvue.com/post/${externalPostId}`, "_blank") },
       });
       queryClient.invalidateQueries({ queryKey: ["schedules"] });
 
     } catch (e: any) {
       const msg = e?.message ?? "Unknown error";
+      publishLog = publishLog + `\n\nERROR: ${msg}`;
       console.error("[publishNow] FAILED:", msg);
       updateItem(id, { status: "failed", queueStatus: "failed" });
       try { await scheduleService.update(id, { status: "failed" }); } catch {}
-      // Show full error so you can debug which step failed
-      toast.error("Publish failed", { id: toastId, description: msg, duration: 20_000 });
+      setDebugLog(publishLog);
+      toast.error("Publish failed", {
+        id: toastId, duration: 20_000,
+        description: msg.slice(0, 120),
+        action: { label: "View debug log", onClick: () => setDebugOpen(true) },
+      });
     }
   };
 
@@ -812,8 +735,7 @@ function SchedulePage() {
     if (!dragId) return;
     const item = items.find((i) => i.id === dragId);
     if (!item) return;
-    const newD = new Date(day);
-    const oldD = new Date(item.scheduledAt);
+    const newD = new Date(day); const oldD = new Date(item.scheduledAt);
     newD.setHours(oldD.getHours(), oldD.getMinutes(), 0, 0);
     const iso = newD.toISOString();
     updateItem(dragId, { scheduledAt: iso });
@@ -841,6 +763,9 @@ function SchedulePage() {
                 <p className="mt-1 text-sm text-muted-foreground">Plan, queue and publish approved content to your Fanvue account.</p>
               </div>
               <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" className="gap-2" onClick={() => { if (debugLog) setDebugOpen(true); else toast.info("No debug log yet — attempt a publish first."); }}>
+                  <Bug className="h-4 w-4" /> Debug log
+                </Button>
                 <Button variant="outline" size="sm" className="gap-2" onClick={() => setAccountsOpen(true)}>
                   <Plug className="h-4 w-4" />
                   {connectedCount > 0
@@ -856,7 +781,7 @@ function SchedulePage() {
             {connectedCount === 0 && (
               <div className="flex items-center gap-3 rounded-lg border border-warning/30 bg-warning/5 px-4 py-3">
                 <AlertTriangle className="h-4 w-4 flex-shrink-0 text-warning" />
-                <p className="flex-1 text-sm">No Fanvue account connected. Connect one to start publishing.</p>
+                <p className="flex-1 text-sm">No Fanvue account connected.</p>
                 <Button size="sm" variant="outline" className="gap-1.5" onClick={() => setAccountsOpen(true)}>
                   <ExternalLink className="h-3.5 w-3.5" /> Connect now
                 </Button>
@@ -923,14 +848,14 @@ function SchedulePage() {
               </TabsContent>
               <TabsContent value="queue" className="mt-4">
                 <QueueView
-                  items={filteredItems.filter((i) => ["scheduled", "publishing", "failed"].includes(i.status))}
+                  items={filteredItems.filter((i) => ["scheduled","publishing","failed"].includes(i.status))}
                   getAccount={getAccount} onOpen={setSelected}
                   onCancel={removeItem} onPublishNow={publishNow} onRetry={retryPublish}
                   onSchedule={() => setCreateOpen(true)} />
               </TabsContent>
               <TabsContent value="history" className="mt-4">
                 <HistoryView
-                  items={filteredItems.filter((i) => ["published", "failed"].includes(i.status))}
+                  items={filteredItems.filter((i) => ["published","failed"].includes(i.status))}
                   getAccount={getAccount} onOpen={setSelected} onRetry={retryPublish} />
               </TabsContent>
             </Tabs>
@@ -943,6 +868,7 @@ function SchedulePage() {
       <CreateScheduleDialog open={createOpen} onOpenChange={setCreateOpen} accounts={accounts} />
       <AccountsDialog open={accountsOpen} onOpenChange={setAccountsOpen} accounts={accounts}
         onRefresh={() => { refetchAccounts(); queryClient.invalidateQueries({ queryKey: ["connected-accounts"] }); }} />
+      <DebugLogDialog open={debugOpen} onClose={() => setDebugOpen(false)} log={debugLog} />
     </SidebarProvider>
   );
 }
@@ -955,10 +881,9 @@ function CalendarView({ weekStart, setWeekStart, items, getAccount, onOpen, onDr
   getAccount: (id: string) => ConnectedAccount | undefined; onOpen: (i: ScheduledItem) => void;
   onDragStart: (id: string | null) => void; onDropOnDay: (d: Date) => void; onSchedule: () => void;
 }) {
-  const days   = Array.from({ length: 7 }).map((_, idx) => { const d = new Date(weekStart); d.setDate(d.getDate() + idx); return d; });
-  const move   = (n: number) => { const d = new Date(weekStart); d.setDate(d.getDate() + n * 7); setWeekStart(d); };
+  const days = Array.from({ length: 7 }).map((_, idx) => { const d = new Date(weekStart); d.setDate(d.getDate() + idx); return d; });
+  const move = (n: number) => { const d = new Date(weekStart); d.setDate(d.getDate() + n * 7); setWeekStart(d); };
   const todayD = new Date();
-
   return (
     <Card className="border-border/60 bg-card">
       <CardContent className="p-4">
@@ -969,14 +894,14 @@ function CalendarView({ weekStart, setWeekStart, items, getAccount, onOpen, onDr
           </div>
           <div className="flex items-center gap-1">
             <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => move(-1)}><ChevronLeft className="h-4 w-4" /></Button>
-            <Button variant="outline" size="sm"   className="h-8" onClick={() => { const d = new Date(); d.setHours(0,0,0,0); d.setDate(d.getDate() - d.getDay()); setWeekStart(d); }}>Today</Button>
+            <Button variant="outline" size="sm" className="h-8" onClick={() => { const d = new Date(); d.setHours(0,0,0,0); d.setDate(d.getDate()-d.getDay()); setWeekStart(d); }}>Today</Button>
             <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => move(1)}><ChevronRight className="h-4 w-4" /></Button>
           </div>
         </div>
         {items.length === 0 ? <EmptyState onSchedule={onSchedule} /> : (
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-7">
             {days.map((day) => {
-              const dayItems = items.filter((i) => isSameDay(new Date(i.scheduledAt), day)).sort((a, b) => +new Date(a.scheduledAt) - +new Date(b.scheduledAt));
+              const dayItems = items.filter((i) => isSameDay(new Date(i.scheduledAt), day)).sort((a,b) => +new Date(a.scheduledAt) - +new Date(b.scheduledAt));
               const isToday  = isSameDay(day, todayD);
               return (
                 <div key={day.toISOString()} onDragOver={(e) => e.preventDefault()} onDrop={() => onDropOnDay(day)}
@@ -1042,9 +967,11 @@ function QueueView({ items, getAccount, onOpen, onCancel, onPublishNow, onRetry,
                   <QueueBadge status={i.queueStatus} />
                 </div>
                 <p className="mt-0.5 text-xs text-muted-foreground">
-                  {i.character} · {account
-                    ? `@${account.handle}`
-                    : <span className="text-warning">No account linked — will use first connected</span>}
+                  {i.character} ·{" "}
+                  {account ? `@${account.handle}` : <span className="text-warning text-xs">No account linked — will auto-pick first connected</span>}
+                </p>
+                <p className="mt-0.5 text-[11px] text-muted-foreground font-mono break-all">
+                  mediaUrl: {i.mediaUrl ? i.mediaUrl.slice(0, 60) + "…" : <span className="text-destructive">MISSING</span>}
                 </p>
                 <p className="mt-1 inline-flex items-center gap-1 text-xs text-muted-foreground">
                   <Clock className="h-3 w-3" />{fmtDateTime(i.scheduledAt)}
@@ -1052,9 +979,7 @@ function QueueView({ items, getAccount, onOpen, onCancel, onPublishNow, onRetry,
               </div>
               <div className="flex items-center gap-1.5">
                 {i.status === "failed" ? (
-                  <Button size="sm" variant="outline" className="gap-1.5" onClick={() => onRetry(i.id)}>
-                    <RefreshCw className="h-3.5 w-3.5" /> Retry
-                  </Button>
+                  <Button size="sm" variant="outline" className="gap-1.5" onClick={() => onRetry(i.id)}><RefreshCw className="h-3.5 w-3.5" /> Retry</Button>
                 ) : (
                   <Button size="sm" variant="outline" className="gap-1.5" onClick={() => onPublishNow(i.id)} disabled={i.status === "publishing"}>
                     {i.status === "publishing" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
@@ -1066,9 +991,7 @@ function QueueView({ items, getAccount, onOpen, onCancel, onPublishNow, onRetry,
                   <DropdownMenuContent align="end">
                     <DropdownMenuItem onClick={() => onOpen(i)}><Eye className="mr-2 h-4 w-4" /> View details</DropdownMenuItem>
                     <DropdownMenuSeparator />
-                    <DropdownMenuItem onClick={() => onCancel(i.id)} className="text-destructive focus:text-destructive">
-                      <Trash2 className="mr-2 h-4 w-4" /> Cancel
-                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => onCancel(i.id)} className="text-destructive focus:text-destructive"><Trash2 className="mr-2 h-4 w-4" /> Cancel</DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
               </div>
@@ -1088,65 +1011,53 @@ function HistoryView({ items, getAccount, onOpen, onRetry }: {
   onOpen: (i: ScheduledItem) => void; onRetry: (id: string) => void;
 }) {
   if (items.length === 0) return (
-    <Card className="border-border/60 bg-card">
-      <CardContent className="p-10 text-center">
-        <Inbox className="mx-auto h-10 w-10 text-muted-foreground/60" />
-        <p className="mt-3 font-medium">No publishing history yet</p>
-        <p className="mt-1 text-sm text-muted-foreground">Published and failed posts will appear here.</p>
-      </CardContent>
-    </Card>
+    <Card className="border-border/60 bg-card"><CardContent className="p-10 text-center">
+      <Inbox className="mx-auto h-10 w-10 text-muted-foreground/60" />
+      <p className="mt-3 font-medium">No publishing history yet</p>
+    </CardContent></Card>
   );
   return (
-    <Card className="border-border/60 bg-card">
-      <CardContent className="p-0">
-        <div className="grid grid-cols-12 gap-3 border-b border-border/60 px-4 py-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-          <div className="col-span-5">Content</div><div className="col-span-2">Account</div>
-          <div className="col-span-2">Published</div><div className="col-span-2">Post UUID</div>
-          <div className="col-span-1 text-right">Status</div>
-        </div>
-        {items.map((i) => {
-          const account = getAccount(i.accountId);
-          return (
-            <button key={i.id} type="button" onClick={() => onOpen(i)}
-              className="grid w-full grid-cols-12 items-center gap-3 border-b border-border/40 px-4 py-3 text-left hover:bg-muted/40 last:border-b-0">
-              <div className="col-span-5 flex items-center gap-3">
-                <div className="relative h-12 w-16 shrink-0 overflow-hidden rounded">
-                  <img src={i.thumbnail} alt={i.contentName} className="h-full w-full object-cover" />
-                  {i.type === "video" && <div className="absolute inset-0 grid place-items-center bg-black/30"><Play className="h-3.5 w-3.5 text-white" /></div>}
-                </div>
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium">{i.contentName}</p>
-                  <p className="truncate text-xs text-muted-foreground">{i.character}</p>
-                </div>
+    <Card className="border-border/60 bg-card"><CardContent className="p-0">
+      <div className="grid grid-cols-12 gap-3 border-b border-border/60 px-4 py-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+        <div className="col-span-5">Content</div><div className="col-span-2">Account</div>
+        <div className="col-span-2">Published</div><div className="col-span-2">Post UUID</div>
+        <div className="col-span-1 text-right">Status</div>
+      </div>
+      {items.map((i) => {
+        const account = getAccount(i.accountId);
+        return (
+          <button key={i.id} type="button" onClick={() => onOpen(i)}
+            className="grid w-full grid-cols-12 items-center gap-3 border-b border-border/40 px-4 py-3 text-left hover:bg-muted/40 last:border-b-0">
+            <div className="col-span-5 flex items-center gap-3">
+              <div className="relative h-12 w-16 shrink-0 overflow-hidden rounded">
+                <img src={i.thumbnail} alt={i.contentName} className="h-full w-full object-cover" />
+                {i.type === "video" && <div className="absolute inset-0 grid place-items-center bg-black/30"><Play className="h-3.5 w-3.5 text-white" /></div>}
               </div>
-              <div className="col-span-2 text-xs"><p className="truncate">{account?.name ?? "—"}</p><p className="truncate text-muted-foreground">@{account?.handle ?? "—"}</p></div>
-              <div className="col-span-2 text-xs text-muted-foreground">{i.publishedAt ? fmtDateTime(i.publishedAt) : "—"}</div>
-              <div className="col-span-2 truncate font-mono text-[11px] text-muted-foreground">{i.externalPostId ?? "—"}</div>
-              <div className="col-span-1 flex items-center justify-end gap-2">
-                <StatusBadge status={i.status} />
-                {i.status === "failed" && (
-                  <Button size="icon" variant="ghost" className="h-7 w-7" onClick={(e) => { e.stopPropagation(); onRetry(i.id); }}>
-                    <RefreshCw className="h-3.5 w-3.5" />
-                  </Button>
-                )}
+              <div className="min-w-0">
+                <p className="truncate text-sm font-medium">{i.contentName}</p>
+                <p className="truncate text-xs text-muted-foreground">{i.character}</p>
               </div>
-            </button>
-          );
-        })}
-      </CardContent>
-    </Card>
+            </div>
+            <div className="col-span-2 text-xs"><p className="truncate">{account?.name ?? "—"}</p><p className="truncate text-muted-foreground">@{account?.handle ?? "—"}</p></div>
+            <div className="col-span-2 text-xs text-muted-foreground">{i.publishedAt ? fmtDateTime(i.publishedAt) : "—"}</div>
+            <div className="col-span-2 truncate font-mono text-[11px] text-muted-foreground">{i.externalPostId ?? "—"}</div>
+            <div className="col-span-1 flex items-center justify-end gap-2">
+              <StatusBadge status={i.status} />
+              {i.status === "failed" && (
+                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={(e) => { e.stopPropagation(); onRetry(i.id); }}><RefreshCw className="h-3.5 w-3.5" /></Button>
+              )}
+            </div>
+          </button>
+        );
+      })}
+    </CardContent></Card>
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Empty state
-// ─────────────────────────────────────────────────────────────────────────────
 function EmptyState({ onSchedule, message = "No scheduled content." }: { onSchedule: () => void; message?: string }) {
   return (
     <div className="mx-auto max-w-md py-10 text-center">
-      <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl border border-border/60 bg-background">
-        <CalendarClock className="h-6 w-6 text-muted-foreground" />
-      </div>
+      <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl border border-border/60 bg-background"><CalendarClock className="h-6 w-6 text-muted-foreground" /></div>
       <p className="mt-4 font-display text-lg font-semibold">{message}</p>
       <p className="mt-1 text-sm text-muted-foreground">Pick an approved asset and schedule it to your Fanvue account.</p>
       <Button size="sm" className="mt-5 gap-2" onClick={onSchedule}><CalendarPlus className="h-4 w-4" /> Schedule content</Button>
@@ -1166,74 +1077,87 @@ function DetailSheet({ item, onClose, getAccount, onRetry, onPublishNow, onRemov
   return (
     <Sheet open={!!item} onOpenChange={(o) => !o && onClose()}>
       <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
-        {item && (
-          <>
-            <SheetHeader>
-              <SheetTitle className="flex items-center gap-2">{item.contentName} <StatusBadge status={item.status} /></SheetTitle>
-              <SheetDescription>{item.character} · {item.type} · {fmtDateTime(item.scheduledAt)}</SheetDescription>
-            </SheetHeader>
-            <div className="mt-6 space-y-6">
-              <div className="relative aspect-video overflow-hidden rounded-lg bg-muted">
-                {item.type === "video"
-                  ? <video src={item.mediaUrl || item.thumbnail} controls playsInline className="h-full w-full object-cover" />
-                  : <img src={item.mediaUrl || item.thumbnail} alt={item.contentName} className="h-full w-full object-cover" />}
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="Scheduled"         value={fmtDateTime(item.scheduledAt)} />
-                <Field label="Connected account" value={account ? `${account.name} (@${account.handle})` : "Not linked yet — will auto-pick"} />
-                {item.publishedAt && <Field label="Published at" value={fmtDateTime(item.publishedAt)} />}
-              </div>
-              {item.externalPostId && (
-                <div className="rounded-md border border-border bg-background/40 p-3">
-                  <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Fanvue Post UUID</p>
-                  <p className="mt-1 font-mono text-xs break-all text-foreground">{item.externalPostId}</p>
-                  {item.externalPostId.includes("-") && (
-                    <a href={`https://www.fanvue.com/post/${item.externalPostId}`} target="_blank" rel="noopener noreferrer"
-                      className="mt-2 inline-flex items-center gap-1.5 text-xs text-primary hover:underline">
-                      <ExternalLink className="h-3 w-3" /> View on Fanvue
-                    </a>
-                  )}
-                </div>
-              )}
-              <div>
-                <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Scene prompts</p>
-                <ScrollArea className="h-40 rounded-md border border-border bg-background/40 p-3">
-                  <ol className="space-y-2 text-xs">
-                    {item.scenePrompts.map((p, idx) => (
-                      <li key={idx} className="leading-relaxed"><span className="mr-1 text-muted-foreground">{idx + 1}.</span>{p}</li>
-                    ))}
-                  </ol>
-                </ScrollArea>
-              </div>
-              <div>
-                <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">History</p>
-                <ol className="relative space-y-3 border-l border-border pl-4">
-                  {item.history.map((h, idx) => (
-                    <li key={idx} className="relative">
-                      <span className="absolute -left-[21px] top-1 h-2.5 w-2.5 rounded-full bg-primary ring-4 ring-background" />
-                      <p className="text-xs font-medium">{h.label}</p>
-                      <p className="text-[11px] text-muted-foreground">{fmtDateTime(h.at)}</p>
-                    </li>
-                  ))}
-                </ol>
-              </div>
-              <Separator />
-              <div className="flex flex-wrap items-center gap-2">
-                {item.status === "failed"
-                  ? <Button size="sm" className="gap-2" onClick={() => onRetry(item.id)}><RefreshCw className="h-4 w-4" /> Retry</Button>
-                  : item.status !== "published"
-                    ? <Button size="sm" className="gap-2" onClick={() => onPublishNow(item.id)} disabled={item.status === "publishing"}>
-                        {item.status === "publishing" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-                        {item.status === "publishing" ? "Publishing…" : "Publish now"}
-                      </Button>
-                    : null}
-                <Button size="sm" variant="outline" className="gap-2 text-destructive hover:text-destructive" onClick={() => onRemove(item.id)}>
-                  <Trash2 className="h-4 w-4" /> Remove
-                </Button>
-              </div>
+        {item && (<>
+          <SheetHeader>
+            <SheetTitle className="flex items-center gap-2">{item.contentName} <StatusBadge status={item.status} /></SheetTitle>
+            <SheetDescription>{item.character} · {item.type} · {fmtDateTime(item.scheduledAt)}</SheetDescription>
+          </SheetHeader>
+          <div className="mt-6 space-y-6">
+            <div className="relative aspect-video overflow-hidden rounded-lg bg-muted">
+              {item.type === "video"
+                ? <video src={item.mediaUrl || item.thumbnail} controls playsInline className="h-full w-full object-cover" />
+                : <img src={item.mediaUrl || item.thumbnail} alt={item.contentName} className="h-full w-full object-cover" />}
             </div>
-          </>
-        )}
+
+            {/* Media URL debug info */}
+            <div className="rounded-md border border-border bg-background/40 p-3">
+              <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground mb-1">Media URL (must be non-empty)</p>
+              {item.mediaUrl
+                ? <p className="font-mono text-[11px] break-all text-foreground">{item.mediaUrl}</p>
+                : <p className="text-destructive text-xs font-semibold">⚠️ MISSING — image/video URL is empty. The asset did not finish generating.</p>}
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Scheduled"         value={fmtDateTime(item.scheduledAt)} />
+              <Field label="Connected account" value={account ? `${account.name} (@${account.handle})` : "Not linked — will auto-pick"} />
+              {item.publishedAt && <Field label="Published at" value={fmtDateTime(item.publishedAt)} />}
+            </div>
+
+            {item.externalPostId && (
+              <div className="rounded-md border border-border bg-background/40 p-3">
+                <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Fanvue Post UUID</p>
+                <p className="mt-1 font-mono text-xs break-all text-foreground">{item.externalPostId}</p>
+                {/* Only show link if it looks like a real Fanvue UUID (has dashes), not a fake fv_timestamp */}
+                {item.externalPostId.match(/^[0-9a-f-]{36}$/) && (
+                  <a href={`https://www.fanvue.com/post/${item.externalPostId}`} target="_blank" rel="noopener noreferrer"
+                    className="mt-2 inline-flex items-center gap-1.5 text-xs text-primary hover:underline">
+                    <ExternalLink className="h-3 w-3" /> View on Fanvue
+                  </a>
+                )}
+                {!item.externalPostId.match(/^[0-9a-f-]{36}$/) && (
+                  <p className="mt-1 text-[11px] text-destructive">⚠️ This is a fake ID from a previous broken publish. Retry to get a real UUID.</p>
+                )}
+              </div>
+            )}
+
+            <div>
+              <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Scene prompts</p>
+              <ScrollArea className="h-40 rounded-md border border-border bg-background/40 p-3">
+                <ol className="space-y-2 text-xs">
+                  {item.scenePrompts.map((p, idx) => <li key={idx} className="leading-relaxed"><span className="mr-1 text-muted-foreground">{idx + 1}.</span>{p}</li>)}
+                </ol>
+              </ScrollArea>
+            </div>
+
+            <div>
+              <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">History</p>
+              <ol className="relative space-y-3 border-l border-border pl-4">
+                {item.history.map((h, idx) => (
+                  <li key={idx} className="relative">
+                    <span className="absolute -left-[21px] top-1 h-2.5 w-2.5 rounded-full bg-primary ring-4 ring-background" />
+                    <p className="text-xs font-medium">{h.label}</p>
+                    <p className="text-[11px] text-muted-foreground">{fmtDateTime(h.at)}</p>
+                  </li>
+                ))}
+              </ol>
+            </div>
+
+            <Separator />
+            <div className="flex flex-wrap items-center gap-2">
+              {item.status === "failed"
+                ? <Button size="sm" className="gap-2" onClick={() => onRetry(item.id)}><RefreshCw className="h-4 w-4" /> Retry</Button>
+                : item.status !== "published"
+                  ? <Button size="sm" className="gap-2" onClick={() => onPublishNow(item.id)} disabled={item.status === "publishing"}>
+                      {item.status === "publishing" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                      {item.status === "publishing" ? "Publishing…" : "Publish now"}
+                    </Button>
+                  : null}
+              <Button size="sm" variant="outline" className="gap-2 text-destructive hover:text-destructive" onClick={() => onRemove(item.id)}>
+                <Trash2 className="h-4 w-4" /> Remove
+              </Button>
+            </div>
+          </div>
+        </>)}
       </SheetContent>
     </Sheet>
   );
@@ -1250,7 +1174,6 @@ function Field({ label, value }: { label: string; value: string }) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Create schedule dialog
-// Saves connected_account_id on BOTH the schedule row AND the asset row
 // ─────────────────────────────────────────────────────────────────────────────
 type ApprovedAsset = { id: string; type: "image" | "video"; name: string };
 const EMPTY_APPROVED_ASSETS: ApprovedAsset[] = [];
@@ -1277,18 +1200,13 @@ async function fetchApprovedAssets(): Promise<ApprovedAsset[]> {
 function CreateScheduleDialog({ open, onOpenChange, accounts }: {
   open: boolean; onOpenChange: (o: boolean) => void; accounts: ConnectedAccount[];
 }) {
-  const queryClient = useQueryClient();
-  const { data: assets = EMPTY_APPROVED_ASSETS } = useQuery({
-    queryKey: ["approved-assets"], queryFn: fetchApprovedAssets, enabled: open,
-  });
-
+  const queryClient    = useQueryClient();
+  const { data: assets = EMPTY_APPROVED_ASSETS } = useQuery({ queryKey: ["approved-assets"], queryFn: fetchApprovedAssets, enabled: open });
   const connectedAccounts = accounts.filter((a) => a.status === "connected");
 
   const [contentIdx, setContentIdx] = useState("0");
   const [accountId,  setAccountId]  = useState("");
-  const [date, setDate] = useState(() => {
-    const d = new Date(); d.setDate(d.getDate() + 1); return d.toISOString().slice(0, 10);
-  });
+  const [date, setDate] = useState(() => { const d = new Date(); d.setDate(d.getDate()+1); return d.toISOString().slice(0,10); });
   const [time, setTime] = useState("18:00");
 
   useEffect(() => {
@@ -1300,27 +1218,19 @@ function CreateScheduleDialog({ open, onOpenChange, accounts }: {
     const asset = assets[Number(contentIdx)];
     if (!asset)     { toast.error("Pick an approved asset first"); return; }
     if (!accountId) { toast.error("Select a Fanvue account first"); return; }
-
     const iso = new Date(`${date}T${time}:00`).toISOString();
     try {
       const { data: u } = await supabase.auth.getUser();
-
-      // Insert schedule row — store connected_account_id so publishNow can find it
       const { error: schedErr } = await supabase.from("schedules").insert({
-        content_type:         asset.type,
-        content_id:           asset.id,
-        publish_time:         iso,
-        platform:             "Fanvue",
-        status:               "scheduled",
-        connected_account_id: accountId,  // ← critical: save account on schedule row
-        created_by:           u.user?.id ?? null,
+        content_type: asset.type, content_id: asset.id,
+        publish_time: iso, platform: "Fanvue", status: "scheduled",
+        connected_account_id: accountId,   // ← save here so publishNow can find it
+        created_by: u.user?.id ?? null,
       });
       if (schedErr) throw schedErr;
-
-      // Also save on the asset row as backup
+      // Also save on asset row as backup
       const table = asset.type === "image" ? "images" : "videos";
       await supabase.from(table).update({ connected_account_id: accountId }).eq("id", asset.id);
-
       toast.success("Content scheduled ✅");
       queryClient.invalidateQueries({ queryKey: ["schedules"] });
       onOpenChange(false);
@@ -1338,9 +1248,7 @@ function CreateScheduleDialog({ open, onOpenChange, accounts }: {
           <div className="space-y-1.5">
             <Label>Content</Label>
             {assets.length === 0
-              ? <p className="rounded-md border border-dashed border-border bg-muted/30 p-3 text-xs text-muted-foreground">
-                  No approved content. Approve items in the Review Queue first.
-                </p>
+              ? <p className="rounded-md border border-dashed border-border bg-muted/30 p-3 text-xs text-muted-foreground">No approved content. Approve items in the Review Queue first.</p>
               : <Select value={contentIdx} onValueChange={setContentIdx}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>{assets.map((a, idx) => <SelectItem key={a.id} value={String(idx)}>{a.name}</SelectItem>)}</SelectContent>
@@ -1357,9 +1265,7 @@ function CreateScheduleDialog({ open, onOpenChange, accounts }: {
                 </div>
               : <Select value={accountId} onValueChange={setAccountId}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {connectedAccounts.map((a) => <SelectItem key={a.id} value={a.id}>{a.name} (@{a.handle})</SelectItem>)}
-                  </SelectContent>
+                  <SelectContent>{connectedAccounts.map((a) => <SelectItem key={a.id} value={a.id}>{a.name} (@{a.handle})</SelectItem>)}</SelectContent>
                 </Select>}
           </div>
           <div className="grid grid-cols-2 gap-3">
