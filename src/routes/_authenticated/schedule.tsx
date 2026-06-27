@@ -58,7 +58,7 @@ const FANVUE_CLIENT_SECRET = "05275891c81581c5cb79d336c8e9f87680f0976843bf17d673
 
 // FIXED: Dynamically map origin to support seamless branch and preview redirects safely
 // Look for FANVUE_REDIRECT_URI near the top of the file and replace it exactly with this:
-const FANVUE_REDIRECT_URI = "https://avatar-forge-works-9b035df2-j56ivc6di-saifurrehman022s-projects.vercel.app/schedule";
+const FANVUE_REDIRECT_URI = "https://avatar-forge-works-9b035df2-git-main-saifurrehman022s-projects.vercel.app/schedule";
 
 const FANVUE_AUTH_URL      = "https://auth.fanvue.com/oauth2/auth";
 const FANVUE_TOKEN_URL     = "https://auth.fanvue.com/oauth2/token";
