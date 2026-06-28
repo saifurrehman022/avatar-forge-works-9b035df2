@@ -8,7 +8,7 @@ import {
   Image as ImageIcon, Video as VideoIcon, Play, ArrowLeft, Send,
   Filter, Inbox, ChevronLeft, ChevronRight, MoreHorizontal,
   Trash2, Eye, RefreshCw, AlertTriangle,
-  Loader2, Plug, CheckCircle, ExternalLink, Bug,
+  Loader2, Plug, CheckCircle, ExternalLink, Bug, 
   ChevronDown, ChevronUp, Link2, Copy, Info,
 } from "lucide-react";
 import { toast } from "sonner";
