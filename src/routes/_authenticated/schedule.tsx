@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { scheduleService } from "@/services";
-import {
+import {  
   CalendarClock, CalendarPlus, CheckCircle2, Clock, Search,
   Image as ImageIcon, Video as VideoIcon, Play, ArrowLeft, Send,
   Filter, Inbox, ChevronLeft, ChevronRight, MoreHorizontal,
