@@ -46,9 +46,11 @@ export default async function handler(req: any, res: any) {
       },
       body: new URLSearchParams({
         grant_type: "authorization_code",
+        client_id: FANVUE_CLIENT_ID,
+        client_secret: FANVUE_CLIENT_SECRET,
         code,
-        code_verifier,
         redirect_uri: FANVUE_REDIRECT_URI,
+        code_verifier,
       }).toString(),
     });
 
