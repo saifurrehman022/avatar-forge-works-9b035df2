@@ -42,15 +42,13 @@ export default async function handler(req: any, res: any) {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
+        Authorization: `Basic ${basicAuth}`,
       },
       body: new URLSearchParams({
         grant_type: "authorization_code",
-        client_id: FANVUE_CLIENT_ID,
-        client_secret: FANVUE_CLIENT_SECRET,
         code,
         redirect_uri: FANVUE_REDIRECT_URI,
         code_verifier,
-        scope: "read:creator write:creator write:posts write:media",
       }).toString(),
     });
 
