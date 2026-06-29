@@ -245,10 +245,7 @@ rep(`Authenticated as @${token.handle}`);
 
   const s1R = await fetch(`/api/fanvue-api?path=/creators/${token.uuid}/media/uploads`, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${token.access_token}`,
-      "X-Fanvue-API-Version": "2025-06-26",
-  },
+    headers: fvH(token.access_token),
     body: fd,
 });
   const s1T = await s1R.text();
