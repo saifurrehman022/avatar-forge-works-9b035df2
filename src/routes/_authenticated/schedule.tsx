@@ -251,7 +251,9 @@ async function publishToFanvue(params: {
 
   // Verify token via GET /users/me  (confirmed correct endpoint from docs)
   rep("Verifying token with Fanvue…");
-  const meR = await fetch(`${FANVUE_API_BASE}/users/me`, { headers: fvH(token.accessToken) });
+  const meR = await fetch(`/api/fanvue-api?path=/users/me`, {
+    headers: fvH(token.accessToken)
+      });
   const meText = await meR.text();
   log(`GET /users/me → ${meR.status}`, meText.slice(0, 300));
   if (!meR.ok) throw new Error(`Token rejected (${meR.status}). Reconnect your Fanvue account. Details: ${meText}`);
@@ -268,7 +270,7 @@ async function publishToFanvue(params: {
 
   // Step 1 — POST /media/uploads
   rep("Step 1/5 — Creating upload session…");
-  const s1R = await fetch(`${FANVUE_API_BASE}/media/uploads`, {
+  const s1R = await fetch(`/api/fanvue-api?path=/media/uploads`, {
     method: "POST",
     headers: fvH(token.accessToken, { "Content-Type": "application/json" }),
     body: JSON.stringify({ name: filename, filename, mediaType }),
