@@ -1,6 +1,6 @@
 
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useEffect, useMemo, useState, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { scheduleService } from "@/services";
@@ -10,10 +10,9 @@ import {
   Filter, Inbox, ChevronLeft, ChevronRight, MoreHorizontal,
   Trash2, Eye, RefreshCw, Link2, AlertTriangle,
   Loader2, Plug, CheckCircle, XCircle, ExternalLink, Bug,
-  ChevronDown, ChevronUp, Link as LinkIcon,
+  ChevronDown, ChevronUp,
 } from "lucide-react";
 import { toast } from "sonner";
-
 import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/dashboard/app-sidebar";
 import { AppHeader } from "@/components/dashboard/app-header";
@@ -33,333 +32,386 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { cn } from "@/lib/utils";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Fanvue config  (per official API docs: https://api.fanvue.com/docs)
+// Fanvue OAuth config (hardcoded for testing)
 // ─────────────────────────────────────────────────────────────────────────────
-const FV_CLIENT_ID     = "f9d35fff-3d12-4dd5-8945-750c37d65ae9";
-const FV_CLIENT_SECRET = "05275891c81581c5cb79d336c8e9f87680f0976843bf17d6737bdcf0dde38b1a";
-const FV_REDIRECT_URI  = "https://avatar-forge-works-9b035df2-j56ivc6di-saifurrehman022s-projects.vercel.app/schedule";
-const FV_AUTH_URL      = "https://auth.fanvue.com/oauth2/auth";
-const FV_TOKEN_URL     = "https://auth.fanvue.com/oauth2/token";
-const FV_API           = "https://api.fanvue.com";
-// Required on every request per docs
-const FV_VERSION       = "2025-06-26";
-
-const fvH = (token: string, extra?: Record<string, string>) => ({
-  Authorization: `Bearer ${token}`,
-  "X-Fanvue-API-Version": FV_VERSION,
-  ...extra,
-});
+const FANVUE_CLIENT_ID     = "f9d35fff-3d12-4dd5-8945-750c37d65ae9";
+const FANVUE_CLIENT_SECRET = "05275891c81581c5cb79d336c8e9f87680f0976843bf17d6737bdcf0dde38b1a";
+const FANVUE_REDIRECT_URI  = "https://avatar-forge-works-9b035df2-j56ivc6di-saifurrehman022s-projects.vercel.app/schedule";
+const FANVUE_AUTH_URL      = "https://auth.fanvue.com/oauth2/auth";
+const FANVUE_TOKEN_URL     = "https://auth.fanvue.com/oauth2/token";
+const FANVUE_API_BASE      = "https://api.fanvue.com";
+const FANVUE_API_VERSION   = "2025-06-26";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Debug log
+// Debug log — live panel at bottom of screen
 // ─────────────────────────────────────────────────────────────────────────────
-type LogLevel = "info" | "warn" | "error" | "ok";
+type LogLevel = "info" | "warn" | "error" | "success";
 type LogEntry = { at: number; level: LogLevel; msg: string; detail?: string };
-let _logCbs: Array<(e: LogEntry) => void> = [];
-const log = (level: LogLevel, msg: string, detail?: string) => {
-  const e: LogEntry = { at: Date.now(), level, msg, detail };
-  console[level === "ok" ? "info" : level === "info" ? "log" : level](`[FV ${level}]`, msg, detail ?? "");
-  _logCbs.forEach(fn => fn(e));
-};
-const li  = (msg: string, d?: string) => log("info",  msg, d);
-const lw  = (msg: string, d?: string) => log("warn",  msg, d);
-const le  = (msg: string, d?: string) => log("error", msg, d);
-const lok = (msg: string, d?: string) => log("ok",    msg, d);
+
+let _logListeners: Array<(e: LogEntry) => void> = [];
+function emit(entry: LogEntry) {
+  console[entry.level === "success" ? "info" : entry.level](`[FV]`, entry.msg, entry.detail ?? "");
+  _logListeners.forEach(fn => fn(entry));
+}
+const dbg  = (msg: string, d?: string) => emit({ at: Date.now(), level: "info",    msg, detail: d });
+const dbgOk = (msg: string, d?: string) => emit({ at: Date.now(), level: "success", msg, detail: d });
+const dbgW  = (msg: string, d?: string) => emit({ at: Date.now(), level: "warn",    msg, detail: d });
+const dbgE  = (msg: string, d?: string) => emit({ at: Date.now(), level: "error",   msg, detail: d });
 
 function useDebugLog() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   useEffect(() => {
-    const fn = (e: LogEntry) => setLogs(p => [e, ...p].slice(0, 300));
-    _logCbs.push(fn);
-    return () => { _logCbs = _logCbs.filter(f => f !== fn); };
+    const fn = (e: LogEntry) => setLogs(prev => [e, ...prev].slice(0, 300));
+    _logListeners.push(fn);
+    return () => { _logListeners = _logListeners.filter(f => f !== fn); };
   }, []);
   return { logs, clearLogs: () => setLogs([]) };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Token stored in localStorage (no Supabase needed for the token)
+// Token store — localStorage so it survives OAuth redirects
 // ─────────────────────────────────────────────────────────────────────────────
-const LS_KEY = "fanvue_token";
-type FvToken = { accessToken: string; refreshToken?: string; expiresAt?: number; name: string; handle: string };
+const TOKEN_KEY = "fanvue_token_v2";
 
-function saveToken(t: FvToken)         { localStorage.setItem(LS_KEY, JSON.stringify(t)); }
-function loadToken(): FvToken | null   { try { const r = localStorage.getItem(LS_KEY); return r ? JSON.parse(r) : null; } catch { return null; } }
-function clearToken()                  { localStorage.removeItem(LS_KEY); }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PKCE  (required by Fanvue — without it the auth server rejects the request)
-// ─────────────────────────────────────────────────────────────────────────────
-const b64 = (buf: ArrayBuffer) => {
-  let s = ""; for (const b of new Uint8Array(buf)) s += String.fromCharCode(b);
-  return btoa(s).replace(/=/g,"").replace(/\+/g,"-").replace(/\//g,"_");
+type StoredToken = {
+  accessToken:   string;
+  refreshToken?: string;
+  expiresAt?:    number;
+  name:          string;
+  handle:        string;
+  uuid:          string;
 };
-async function pkce() {
-  const arr = new Uint8Array(32); crypto.getRandomValues(arr);
-  const v = b64(arr.buffer);
-  const c = b64(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(v)));
-  return { v, c };
-}
-const PK = "fv_pkce"; const ST = "fv_state";
 
-async function startOAuth() {
-  const { v, c } = await pkce();
+const saveToken  = (t: StoredToken) => localStorage.setItem(TOKEN_KEY, JSON.stringify(t));
+const loadToken  = (): StoredToken | null => { try { const r = localStorage.getItem(TOKEN_KEY); return r ? JSON.parse(r) : null; } catch { return null; } };
+const clearToken = () => localStorage.removeItem(TOKEN_KEY);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PKCE helpers
+// ─────────────────────────────────────────────────────────────────────────────
+function b64url(buf: ArrayBuffer): string {
+  let s = "";
+  for (const b of new Uint8Array(buf)) s += String.fromCharCode(b);
+  return btoa(s).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+}
+async function generatePKCE() {
+  const arr = new Uint8Array(32);
+  crypto.getRandomValues(arr);
+  const verifier  = b64url(arr.buffer);
+  const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
+  return { verifier, challenge };
+}
+const PKCE_KEY  = "fanvue_pkce_v";
+const STATE_KEY = "fanvue_state";
+
+async function startFanvueOAuth() {
+  const { verifier, challenge } = await generatePKCE();
   const state = crypto.randomUUID();
-  sessionStorage.setItem(PK, v); sessionStorage.setItem(ST, state);
-  const p = new URLSearchParams({
-    client_id: FV_CLIENT_ID, redirect_uri: FV_REDIRECT_URI,
-    response_type: "code",
-    // Scopes needed per official docs:
-    // read:self  → GET /users/me (profile)
-    // write:media → POST /media/uploads, PATCH /media/uploads/{id}, GET /media/{uuid} (needs read:media too)
-    // read:media  → GET /media/{uuid} (poll status) — REQUIRED or poll returns 403
-    // write:post  → POST /posts
-    scope: "openid offline_access read:self read:media write:media write:post",
-    state, code_challenge: c, code_challenge_method: "S256",
+  sessionStorage.setItem(PKCE_KEY,  verifier);
+  sessionStorage.setItem(STATE_KEY, state);
+  const params = new URLSearchParams({
+    client_id:             FANVUE_CLIENT_ID,
+    redirect_uri:          FANVUE_REDIRECT_URI,
+    response_type:         "code",
+    // Exactly the scopes your app has approved
+    scope:                 "openid offline_access read:self read:media write:media write:post",
+    state,
+    code_challenge:        challenge,
+    code_challenge_method: "S256",
   });
-  window.location.href = `${FV_AUTH_URL}?${p}`;
+  window.location.href = `${FANVUE_AUTH_URL}?${params.toString()}`;
 }
 
-async function exchangeCode(code: string): Promise<FvToken> {
-  const v = sessionStorage.getItem(PK);
-  if (!v) throw new Error("PKCE verifier missing. Please click Connect again.");
-  sessionStorage.removeItem(PK); sessionStorage.removeItem(ST);
+async function exchangeFanvueCode(code: string): Promise<StoredToken> {
+  const verifier = sessionStorage.getItem(PKCE_KEY);
+  if (!verifier) throw new Error("PKCE verifier missing — please click Connect again");
+  sessionStorage.removeItem(PKCE_KEY);
+  sessionStorage.removeItem(STATE_KEY);
 
-  li("Exchanging auth code for token…");
-  const res = await fetch(FV_TOKEN_URL, {
-    method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+  dbg("Exchanging auth code for token…");
+  const tokenRes = await fetch(FANVUE_TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
-      grant_type: "authorization_code", code, redirect_uri: FV_REDIRECT_URI,
-      client_id: FV_CLIENT_ID, client_secret: FV_CLIENT_SECRET, code_verifier: v,
+      grant_type:    "authorization_code",
+      code,
+      redirect_uri:  FANVUE_REDIRECT_URI,
+      client_id:     FANVUE_CLIENT_ID,
+      client_secret: FANVUE_CLIENT_SECRET,
+      code_verifier: verifier,
     }).toString(),
   });
-  const txt = await res.text();
-  li(`Token response ${res.status}`, txt.slice(0, 300));
-  if (!res.ok) throw new Error(`Token exchange failed (${res.status}): ${txt}`);
 
-  const tokens = JSON.parse(txt);
-  const at = tokens.access_token as string;
+  const tokenText = await tokenRes.text();
+  dbg(`Token exchange response (${tokenRes.status})`, tokenText.slice(0, 300));
+  if (!tokenRes.ok) throw new Error(`Token exchange failed (${tokenRes.status}): ${tokenText}`);
 
-  // GET /users/me — correct endpoint per docs
-  li("Fetching profile from /users/me…");
-  const pr = await fetch(`${FV_API}/users/me`, { headers: fvH(at) });
-  const pt = await pr.text();
-  li(`/users/me ${pr.status}`, pt.slice(0, 300));
-  const profile = pr.ok ? JSON.parse(pt) : {};
+  const tokens      = JSON.parse(tokenText);
+  const accessToken = tokens.access_token as string;
+  const refreshToken= tokens.refresh_token as string | undefined;
+  const expiresIn   = tokens.expires_in   as number | undefined;
 
-  const token: FvToken = {
-    accessToken:  at,
-    refreshToken: tokens.refresh_token,
-    expiresAt:    tokens.expires_in ? Date.now() + tokens.expires_in * 1000 : undefined,
-    name:   profile.displayName ?? profile.name   ?? profile.username ?? "Fanvue Account",
-    handle: profile.username    ?? profile.handle ?? profile.uuid     ?? "fanvue",
+  dbg("Fetching profile from GET /me…");
+  const meRes  = await fetch(`${FANVUE_API_BASE}/me`, {
+    headers: { Authorization: `Bearer ${accessToken}`, "X-Fanvue-API-Version": FANVUE_API_VERSION },
+  });
+  const meText = await meRes.text();
+  dbg(`/me response (${meRes.status})`, meText.slice(0, 500));
+  const me = meRes.ok ? JSON.parse(meText) : {};
+
+  const stored: StoredToken = {
+    accessToken,
+    refreshToken,
+    expiresAt: expiresIn ? Date.now() + expiresIn * 1000 : undefined,
+    // Try every possible field Fanvue might return for the name
+    name:   me.displayName ?? me.display_name ?? me.name ?? me.fullName ?? me.username ?? "Fanvue Account",
+    handle: me.username    ?? me.handle       ?? me.email ?? me.uuid ?? "fanvue",
+    uuid:   me.uuid        ?? me.id           ?? crypto.randomUUID(),
   };
-  saveToken(token);
-  lok(`Connected as @${token.handle} (${token.name})`);
-  return token;
+
+  saveToken(stored);
+  dbgOk(`Token saved for @${stored.handle} (${stored.name})`, `uuid: ${stored.uuid}`);
+  return stored;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Fanvue publish pipeline — based 100% on official API docs
-//
-// Endpoints (self / non-agency):
-//   POST   /media/uploads                               → { mediaUuid, uploadId }
-//   GET    /media/uploads/{uploadId}/parts/{n}/url      → text/plain presigned URL
-//   PUT    {presignedUrl}                               → S3 upload, returns ETag
-//   PATCH  /media/uploads/{uploadId}                    → { status: "processing" }
-//   GET    /media/{uuid}                                → poll { status: "ready"|"error"|… }
-//   POST   /posts                                       → 201 { uuid, … }
-//
-// Status enum (from docs): created | processing | ready | error
-// Post audience enum:       subscribers | followers-and-subscribers
+// Fanvue API headers
 // ─────────────────────────────────────────────────────────────────────────────
+const fvH = (token: string, extra?: Record<string, string>) => ({
+  Authorization: `Bearer ${token}`,
+  "X-Fanvue-API-Version": FANVUE_API_VERSION,
+  ...extra,
+});
 
-async function fvFetch(url: string, opts: RequestInit, label: string) {
-  li(label, `${opts.method ?? "GET"} ${url}`);
-  const res = await fetch(url, opts);
-  const txt = await res.text();
-  const ok  = res.ok;
-  (ok ? lok : le)(`${label} → ${res.status}`, txt.slice(0, 500));
-  return { ok, status: res.status, text: txt, json: () => JSON.parse(txt), headers: res.headers };
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Media download
+//
+// Images from CloudFront (d2p7pge43lyniu.cloudfront.net) ARE cross-origin.
+// The browser will block direct fetch unless CloudFront sends CORS headers.
+// We try direct first; if blocked we need a server-side proxy.
+//
+// For Vercel, create this file: api/proxy-media.ts
+// ─────────────────────────────────────────────────────────────────────────────
+async function fetchMediaBlob(mediaUrl: string): Promise<Blob> {
+  dbg("Downloading media…", mediaUrl.slice(0, 80));
 
-async function downloadMedia(url: string): Promise<Blob> {
-  li("Downloading media…", url);
-  // Direct fetch works for Supabase public bucket URLs
-  let res = await fetch(url);
-  if (res.ok) {
-    const blob = await res.blob();
-    if (blob.size > 0) { lok(`Downloaded ${(blob.size/1024).toFixed(0)} KB (${blob.type})`); return blob; }
-  }
-  lw(`Direct fetch ${res.status}, trying proxy…`);
-  // Fall back to server-side proxy if direct fetch is blocked (CORS / private bucket)
-  res = await fetch(`/api/proxy-media?url=${encodeURIComponent(url)}`);
-  if (res.ok) {
-    const blob = await res.blob();
-    if (blob.size > 0) { lok(`Proxy download ${(blob.size/1024).toFixed(0)} KB`); return blob; }
-  }
+  // 1. Direct fetch (works for Supabase public bucket; may be blocked for CloudFront)
+  try {
+    const r = await fetch(mediaUrl);
+    if (r.ok) {
+      const b = await r.blob();
+      if (b.size > 0) { dbgOk(`Direct download OK`, `${b.size} bytes, type=${b.type}`); return b; }
+    }
+    dbgW(`Direct fetch returned ${r.status} or empty`);
+  } catch (e: any) { dbgW("Direct fetch blocked by CORS", e?.message); }
+
+  // 2. Server-side proxy (bypasses CORS — needs api/proxy-media.ts on Vercel)
+  dbg("Trying /api/proxy-media…");
+  try {
+    const r = await fetch(`/api/proxy-media?url=${encodeURIComponent(mediaUrl)}`);
+    if (r.ok) {
+      const b = await r.blob();
+      if (b.size > 0) { dbgOk(`Proxy download OK`, `${b.size} bytes`); return b; }
+    }
+    dbgW(`Proxy returned ${r.status}`);
+  } catch (e: any) { dbgW("Proxy not available", e?.message); }
+
   throw new Error(
-    `Cannot download media (HTTP ${res.status}).\n` +
-    `URL: ${url}\n` +
-    `Fix: Go to Supabase → Storage → Policies and make the bucket PUBLIC, ` +
-    `or create a Vercel edge function at /api/proxy-media.ts to proxy the download.`
+    `Cannot download media.\n` +
+    `• Supabase URLs: make sure the bucket is PUBLIC in Dashboard → Storage → Policies\n` +
+    `• CloudFront URLs (d2p7pge43lyniu.cloudfront.net): you MUST create api/proxy-media.ts in your Vercel project\n` +
+    `  Contents:\n` +
+    `  export default async function handler(req, res) {\n` +
+    `    const r = await fetch(req.query.url);\n` +
+    `    res.setHeader('Content-Type', r.headers.get('content-type'));\n` +
+    `    res.send(Buffer.from(await r.arrayBuffer()));\n` +
+    `  }`
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Fanvue upload + post pipeline
+//
+// Per official API docs (https://api.fanvue.com/docs):
+//
+// Step 1  POST /media/uploads                              → {mediaUuid, uploadId}
+// Step 2  GET  /creators/{userUuid}/media/uploads/{uploadId}/parts/{n}/url → presigned S3 URL (text/plain)
+// Step 3  PUT  {presignedUrl}                              → ETag (S3 direct)
+// Step 4  PATCH /media/uploads/{uploadId}                  → complete session
+// Step 5  GET  /media/{mediaUuid}  (poll until status="ready")
+// Step 6  POST /posts                                      → {uuid}
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function publishToFanvue(params: {
-  token: string; mediaUrl: string;
-  mediaType: "image" | "video"; caption: string;
+  token: StoredToken;
+  mediaUrl: string;
+  mediaType: "image" | "video";
+  caption: string;
   onProgress?: (s: string) => void;
 }): Promise<string> {
   const { token, mediaUrl, mediaType, caption, onProgress } = params;
-  const rpt = (s: string) => { li(s); onProgress?.(s); };
+  const rep = (s: string) => { dbg(s); onProgress?.(s); };
 
-  // ── Verify token is still valid ──────────────────────────────────────────
-  rpt("Verifying Fanvue token…");
-  const meR = await fvFetch(`${FV_API}/users/me`, { headers: fvH(token) }, "Verify token");
-  if (!meR.ok) throw new Error(`Token rejected by Fanvue (${meR.status}). Disconnect and reconnect your account.`);
-  lok(`Token valid — authenticated as @${meR.json().username ?? "?"}`);
+  // ── Verify token ──────────────────────────────────────────────────────────
+  rep("Verifying Fanvue token…");
+  const meR = await fetch(`${FANVUE_API_BASE}/me`, { headers: fvH(token.accessToken) });
+  if (!meR.ok) {
+    const body = await meR.text();
+    dbgE(`Token rejected (${meR.status})`, body);
+    throw new Error(`Fanvue token rejected (${meR.status}). Please disconnect and reconnect your account.`);
+  }
+  const me = await meR.json();
+  const userUuid = me.uuid ?? me.id ?? token.uuid;
+  dbgOk(`Authenticated as @${me.username ?? me.handle ?? "?"}`, `uuid: ${userUuid}`);
+  rep(`Authenticated as @${me.username ?? me.handle ?? "?"}`);
 
-  // ── Download media binary ────────────────────────────────────────────────
-  rpt("Downloading media file…");
-  const blob     = await downloadMedia(mediaUrl);
+  // ── Download media ────────────────────────────────────────────────────────
+  rep("Downloading media file…");
+  const blob     = await fetchMediaBlob(mediaUrl);
   const ext      = mediaType === "video" ? "mp4" : "jpeg";
-  const filename = `lila-${Date.now()}.${ext}`;
   const mimeType = mediaType === "video" ? "video/mp4" : "image/jpeg";
+  const filename = `lila-${Date.now()}.${ext}`;
+  rep(`Downloaded ${(blob.size / 1024).toFixed(0)} KB`);
 
-  // ── Step 1: POST /media/uploads ──────────────────────────────────────────
-  // Docs: POST /media/uploads  body: { name, filename, mediaType }
-  // Returns: { mediaUuid, uploadId }
-  rpt("Step 1/5 — Creating Fanvue upload session…");
-  const sessR = await fvFetch(
-    `${FV_API}/media/uploads`,
-    {
-      method: "POST",
-      headers: fvH(token, { "Content-Type": "application/json" }),
-      body: JSON.stringify({ name: filename, filename, mediaType }),
-    },
-    "Create upload session"
-  );
-  if (!sessR.ok) throw new Error(`Create upload session failed (${sessR.status}): ${sessR.text}`);
-  const sess = sessR.json();
-  const { mediaUuid, uploadId } = sess;
-  if (!mediaUuid) throw new Error(`No mediaUuid in response: ${sessR.text}`);
-  if (!uploadId)  throw new Error(`No uploadId in response: ${sessR.text}`);
-  lok(`Session created: mediaUuid=${mediaUuid} uploadId=${uploadId}`);
-
-  // ── Step 2a: GET presigned URL ───────────────────────────────────────────
-  // Docs: GET /media/uploads/{uploadId}/parts/{partNumber}/url
-  // Returns: text/plain — a raw S3 presigned URL
-  rpt("Step 2/5 — Getting upload URL…");
-  const urlR = await fvFetch(
-    `${FV_API}/media/uploads/${uploadId}/parts/1/url`,
-    { headers: fvH(token) },
-    "Get presigned URL"
-  );
-  if (!urlR.ok) throw new Error(`Get presigned URL failed (${urlR.status}): ${urlR.text}`);
-  const presignedUrl = urlR.text.trim().replace(/^"|"$/g, "");
-  if (!presignedUrl.startsWith("https://")) {
-    throw new Error(`Response is not a valid URL: "${presignedUrl.slice(0, 120)}"`);
-  }
-
-  // ── Step 2b: PUT to S3 ───────────────────────────────────────────────────
-  // Standard S3 multipart PUT — no Authorization header (presigned URL is self-authenticating)
-  rpt(`Step 2/5 — Uploading ${(blob.size/1024).toFixed(0)} KB to S3…`);
-  li("PUT to S3 presigned URL…", presignedUrl.slice(0, 80) + "…");
-  const s3R = await fetch(presignedUrl, {
-    method: "PUT", body: blob,
-    headers: { "Content-Type": mimeType },
+  // ── Step 1 — Create upload session ───────────────────────────────────────
+  rep("Creating upload session…");
+  const s1Body = { name: filename, filename, mediaType };
+  dbg("POST /media/uploads", JSON.stringify(s1Body));
+  const s1R = await fetch(`${FANVUE_API_BASE}/media/uploads`, {
+    method: "POST",
+    headers: fvH(token.accessToken, { "Content-Type": "application/json" }),
+    body: JSON.stringify(s1Body),
   });
-  if (!s3R.ok) throw new Error(`S3 upload failed (${s3R.status}): ${await s3R.text()}`);
-  const rawEtag = (s3R.headers.get("ETag") ?? s3R.headers.get("etag") ?? "").replace(/"/g, "");
-  if (!rawEtag) throw new Error("S3 returned no ETag — upload may have silently failed");
-  lok(`S3 upload OK — ETag: ${rawEtag}`);
+  const s1Text = await s1R.text();
+  dbg(`POST /media/uploads → ${s1R.status}`, s1Text.slice(0, 400));
+  if (!s1R.ok) throw new Error(`Step 1 Create upload session (${s1R.status}): ${s1Text}`);
+  const s1 = JSON.parse(s1Text);
+  const { mediaUuid, uploadId } = s1;
+  if (!mediaUuid) throw new Error(`Step 1: no mediaUuid in response: ${s1Text}`);
+  if (!uploadId)  throw new Error(`Step 1: no uploadId in response: ${s1Text}`);
+  dbgOk(`Upload session created`, `mediaUuid=${mediaUuid} uploadId=${uploadId}`);
 
-  // ── Step 3: PATCH /media/uploads/{uploadId} ──────────────────────────────
-  // Docs: PATCH /media/uploads/{uploadId}  body: { parts: [{PartNumber, ETag}] }
-  // Returns: { status: "processing" }
-  rpt("Step 3/5 — Completing upload…");
-  const compR = await fvFetch(
-    `${FV_API}/media/uploads/${uploadId}`,
-    {
-      method: "PATCH",
-      headers: fvH(token, { "Content-Type": "application/json" }),
-      body: JSON.stringify({ parts: [{ PartNumber: 1, ETag: rawEtag }] }),
-    },
-    "Complete upload"
-  );
-  if (!compR.ok) throw new Error(`Complete upload failed (${compR.status}): ${compR.text}`);
-  lok(`Upload completed — status: ${compR.json().status}`);
-
-  // ── Step 4: Poll GET /media/{uuid} until status === "ready" ─────────────
-  // Docs: status enum = created | processing | ready | error
-  // NOTE: requires read:media scope. For non-FINALISED media only uuid + status returned.
-  rpt("Step 4/5 — Waiting for Fanvue to process media…");
-  const DEADLINE = Date.now() + 180_000; // 3 minute max
-  let lastStatus = "";
-  while (Date.now() < DEADLINE) {
-    const pollR = await fvFetch(
-      `${FV_API}/media/${mediaUuid}`,
-      { headers: fvH(token) },
-      "Poll media status"
-    );
-    if (!pollR.ok && pollR.status !== 404) {
-      throw new Error(`Media poll failed (${pollR.status}): ${pollR.text}`);
-    }
-    if (pollR.ok) {
-      const d = pollR.json();
-      const s = (d.status ?? "").toLowerCase();
-      if (s !== lastStatus) { li(`Media status: "${s}"`); lastStatus = s; }
-      rpt(`Processing… (status: ${s})`);
-      if (s === "ready")   { lok("Media is ready ✓"); break; }
-      if (s === "error")   throw new Error("Fanvue rejected the media. Check format: images must be JPEG/PNG, videos must be MP4 (H.264).");
-      // "created" or "processing" — keep polling
-    }
-    await new Promise(r => setTimeout(r, 4_000));
+  // ── Step 2 — Get presigned S3 URL ─────────────────────────────────────────
+  // IMPORTANT: Per Fanvue API docs, the self-user presigned URL endpoint uses
+  // the creator-scoped path with your OWN uuid as the creatorUserUuid parameter.
+  rep("Getting S3 upload URL…");
+  const s2Url = `${FANVUE_API_BASE}/creators/${userUuid}/media/uploads/${uploadId}/parts/1/url`;
+  dbg(`GET ${s2Url}`);
+  const s2R = await fetch(s2Url, { headers: fvH(token.accessToken) });
+  const s2Text = await s2R.text();
+  dbg(`GET presigned URL → ${s2R.status}`, s2Text.slice(0, 300));
+  if (!s2R.ok) throw new Error(`Step 2 Get presigned URL (${s2R.status}): ${s2Text}`);
+  // Response is text/plain — strip any surrounding quotes
+  const presignedUrl = s2Text.trim().replace(/^"|"$/g, "");
+  if (!presignedUrl.startsWith("https://")) {
+    throw new Error(`Step 2: unexpected presigned URL: "${presignedUrl.slice(0, 120)}"`);
   }
-  if (Date.now() >= DEADLINE) throw new Error("Timed out (3 min) waiting for Fanvue to process the media.");
+  dbgOk("Got S3 presigned URL", presignedUrl.slice(0, 70) + "…");
 
-  // ── Step 5: POST /posts ──────────────────────────────────────────────────
-  // Docs: POST /posts  →  201  { uuid, createdAt, text, price, audience, … }
-  // audience is REQUIRED: "subscribers" | "followers-and-subscribers"
-  rpt("Step 5/5 — Creating post on Fanvue…");
+  // ── Step 3 — PUT to S3 ────────────────────────────────────────────────────
+  rep(`Uploading ${(blob.size / 1024).toFixed(0)} KB to S3…`);
+  // Use the blob type if available, otherwise fall back to mimeType
+  const uploadBlob = new Blob([blob], { type: blob.type || mimeType });
+  const s3R = await fetch(presignedUrl, {
+    method: "PUT",
+    body: uploadBlob,
+    headers: { "Content-Type": blob.type || mimeType },
+  });
+  if (!s3R.ok) {
+    const s3Err = await s3R.text();
+    dbgE(`S3 upload failed (${s3R.status})`, s3Err.slice(0, 300));
+    throw new Error(`Step 3 S3 upload (${s3R.status}): ${s3Err}`);
+  }
+  const rawEtag = s3R.headers.get("ETag") ?? s3R.headers.get("etag") ?? "";
+  const etag    = rawEtag.replace(/^"|"$/g, ""); // Strip S3 quote-wrapping
+  if (!etag) throw new Error("Step 3: S3 returned no ETag — upload may have failed");
+  dbgOk("S3 upload complete", `ETag: ${etag}`);
+  rep("Upload complete, finalising…");
+
+  // ── Step 4 — Complete multipart session ───────────────────────────────────
+  const s4Body = { parts: [{ PartNumber: 1, ETag: etag }] };
+  dbg(`PATCH /media/uploads/${uploadId}`, JSON.stringify(s4Body));
+  const s4R = await fetch(`${FANVUE_API_BASE}/media/uploads/${uploadId}`, {
+    method: "PATCH",
+    headers: fvH(token.accessToken, { "Content-Type": "application/json" }),
+    body: JSON.stringify(s4Body),
+  });
+  const s4Text = await s4R.text();
+  dbg(`PATCH complete → ${s4R.status}`, s4Text.slice(0, 200));
+  if (!s4R.ok) throw new Error(`Step 4 Complete upload (${s4R.status}): ${s4Text}`);
+  dbgOk("Upload session completed", `status: ${JSON.parse(s4Text).status ?? "?"}`);
+
+  // ── Step 5 — Poll until media is "ready" ──────────────────────────────────
+  // CRITICAL: Fanvue processes uploads async. Creating a post while media is
+  // still "processing" will result in a post with no visible image/video.
+  rep("Waiting for Fanvue to process media…");
+  const READY_STATUSES  = new Set(["ready", "READY"]);
+  const FAILED_STATUSES = new Set(["error", "ERROR", "failed"]);
+  const deadline = Date.now() + 180_000; // 3 min max (videos take longer)
+  let lastStatus = "";
+  let pollCount  = 0;
+
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 4000));
+    pollCount++;
+    try {
+      const pR = await fetch(`${FANVUE_API_BASE}/media/${mediaUuid}`, {
+        headers: fvH(token.accessToken),
+      });
+      if (pR.ok) {
+        const pData = await pR.json();
+        const status = pData.status ?? "";
+        if (status !== lastStatus) {
+          dbg(`Media poll #${pollCount}: status="${status}"`, JSON.stringify(pData).slice(0, 200));
+          lastStatus = status;
+          rep(`Processing… (${status})`);
+        }
+        if (READY_STATUSES.has(status))  { dbgOk("Media ready ✓", mediaUuid); break; }
+        if (FAILED_STATUSES.has(status)) throw new Error(`Fanvue media processing failed (status: ${status}). Use JPEG/PNG for images, MP4 for video.`);
+      } else {
+        dbgW(`Poll #${pollCount} returned ${pR.status}`);
+      }
+    } catch (e) {
+      if (e instanceof Error && e.message.includes("processing failed")) throw e;
+      dbgW(`Poll #${pollCount} error`, String(e));
+    }
+  }
+
+  if (Date.now() >= deadline) {
+    throw new Error("Timed out waiting for Fanvue media (3 min). File may be too large or in an unsupported format.");
+  }
+
+  // ── Step 6 — Create post ──────────────────────────────────────────────────
+  rep("Creating post on Fanvue…");
   const postBody = {
     text: caption,
     mediaUuids: [mediaUuid],
     audience: "followers-and-subscribers" as const,
   };
-  li("POST /posts body", JSON.stringify(postBody));
-  const postR = await fvFetch(
-    `${FV_API}/posts`,
-    {
-      method: "POST",
-      headers: fvH(token, { "Content-Type": "application/json" }),
-      body: JSON.stringify(postBody),
-    },
-    "Create post"
-  );
-  // Docs say 201 on success
-  if (postR.status !== 201 && !postR.ok) {
-    throw new Error(`Create post failed (${postR.status}): ${postR.text}`);
+  dbg("POST /posts", JSON.stringify(postBody));
+  const pR = await fetch(`${FANVUE_API_BASE}/posts`, {
+    method: "POST",
+    headers: fvH(token.accessToken, { "Content-Type": "application/json" }),
+    body: JSON.stringify(postBody),
+  });
+  const pText = await pR.text();
+  dbg(`POST /posts → ${pR.status}`, pText.slice(0, 400));
+  // POST /posts returns 201 on success per API docs
+  if (!pR.ok) throw new Error(`Step 6 Create post (${pR.status}): ${pText}`);
+  const pData = JSON.parse(pText);
+  dbgOk("POST /posts full response", JSON.stringify(pData));
+
+  // Per docs the field is "uuid"
+  const postUuid = pData.uuid ?? pData.id ?? pData.postId ?? pData.post?.uuid;
+  if (!postUuid) {
+    // Post was created but no UUID in response — log everything
+    dbgE("No post UUID in response", JSON.stringify(pData));
+    throw new Error(`Post created on Fanvue but no UUID returned. Full response: ${pText.slice(0, 400)}`);
   }
-  const postData = postR.json();
-  // Docs confirm response field is "uuid"
-  const postUuid = postData.uuid as string | undefined;
-  if (!postUuid) throw new Error(`Post created but no UUID in response: ${postR.text.slice(0,300)}`);
 
-  lok(`Post published! UUID: ${postUuid}`);
-  rpt(`✅ Published! UUID: ${postUuid}`);
-  return postUuid;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Post-by-URL helper  (the "quick post" feature — user pastes a CloudFront URL)
-// This still uses the same 5-step pipeline, it just pre-fills the mediaUrl.
-// ─────────────────────────────────────────────────────────────────────────────
-function isImageUrl(url: string) {
-  return /\.(jpe?g|png|webp|gif)(\?.*)?$/i.test(url);
-}
-function isVideoUrl(url: string) {
-  return /\.(mp4|mov|webm)(\?.*)?$/i.test(url);
+  dbgOk("🎉 Post published!", `UUID: ${postUuid}`);
+  rep(`Published! Post UUID: ${postUuid}`);
+  return postUuid as string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -369,7 +421,7 @@ function RouteErrorBoundary({ error, reset }: { error: Error; reset: () => void 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center gap-3 bg-background px-6 text-center">
       <h2 className="font-display text-lg font-semibold">Scheduling couldn't load</h2>
-      <p className="max-w-md text-sm text-muted-foreground">{error?.message ?? "Unknown error"}</p>
+      <p className="max-w-md text-sm text-muted-foreground">{error?.message}</p>
       <div className="flex gap-2">
         <button onClick={() => reset()} className="rounded-md border border-input bg-background px-4 py-2 text-sm">Try again</button>
         <a href="/" className="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground">Go home</a>
@@ -379,12 +431,7 @@ function RouteErrorBoundary({ error, reset }: { error: Error; reset: () => void 
 }
 
 export const Route = createFileRoute("/_authenticated/schedule")({
-  head: () => ({
-    meta: [
-      { title: "Scheduling — Lila Studio" },
-      { name: "description", content: "Schedule and publish content to Fanvue." },
-    ],
-  }),
+  head: () => ({ meta: [{ title: "Scheduling — Lila Studio" }] }),
   component: SchedulePage,
   errorComponent: RouteErrorBoundary,
 });
@@ -395,11 +442,8 @@ export const Route = createFileRoute("/_authenticated/schedule")({
 type PublishStatus = "scheduled" | "publishing" | "published" | "failed";
 type QueueStatus   = "waiting" | "ready" | "publishing" | "published" | "failed";
 type ContentType   = "image" | "video";
+type HistoryEvent  = { at: string; label: string; kind: "scheduled"|"queued"|"publishing"|"published"|"failed"|"retried" };
 
-type HistoryEvent  = {
-  at: string; label: string;
-  kind: "scheduled"|"publishing"|"published"|"failed"|"retried";
-};
 type ScheduledItem = {
   id: string; contentName: string; type: ContentType; character: string;
   thumbnail: string; mediaUrl: string; scheduledAt: string;
@@ -413,7 +457,7 @@ const EMPTY: ScheduledItem[] = [];
 const PLACEHOLDER = "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=600&q=80";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Data fetchers
+// Data fetching
 // ─────────────────────────────────────────────────────────────────────────────
 async function fetchSchedules(): Promise<ScheduledItem[]> {
   const { data: rows, error } = await supabase.from("schedules").select("*").order("publish_time");
@@ -422,37 +466,33 @@ async function fetchSchedules(): Promise<ScheduledItem[]> {
   const imgIds = (rows ?? []).filter((r: any) => r.content_type === "image").map((r: any) => r.content_id);
   const vidIds = (rows ?? []).filter((r: any) => r.content_type === "video").map((r: any) => r.content_id);
 
-  const [imgRes, vidRes, charRes] = await Promise.all([
-    imgIds.length ? supabase.from("images").select("id,image_url,prompt,character_id,published_at,external_post_id,publish_status").in("id", imgIds) : Promise.resolve({ data: [] } as any),
-    vidIds.length ? supabase.from("videos").select("id,video_url,prompt,scene_prompts,character_id,published_at,external_post_id,publish_status").in("id", vidIds) : Promise.resolve({ data: [] } as any),
+  const [imgR, vidR, charR] = await Promise.all([
+    imgIds.length ? supabase.from("images").select("id,image_url,prompt,character_id,published_at,external_post_id,publish_status").in("id", imgIds) : Promise.resolve({data:[]} as any),
+    vidIds.length ? supabase.from("videos").select("id,video_url,prompt,scene_prompts,character_id,published_at,external_post_id,publish_status").in("id", vidIds) : Promise.resolve({data:[]} as any),
     supabase.from("characters").select("id,name,reference_image_url"),
   ]);
 
-  const imgMap  = new Map((imgRes.data  ?? []).map((i: any) => [i.id, i]));
-  const vidMap  = new Map((vidRes.data  ?? []).map((v: any) => [v.id, v]));
-  const charMap = new Map((charRes.data ?? []).map((c: any) => [c.id, c]));
+  const imgMap  = new Map((imgR.data  ?? []).map((i: any) => [i.id, i]));
+  const vidMap  = new Map((vidR.data  ?? []).map((v: any) => [v.id, v]));
+  const charMap = new Map((charR.data ?? []).map((c: any) => [c.id, c]));
 
   return (rows ?? []).map((r: any): ScheduledItem => {
-    const isVid = r.content_type === "video";
-    const src: any  = isVid ? vidMap.get(r.content_id) : imgMap.get(r.content_id);
-    const char: any = src?.character_id ? charMap.get(src.character_id) : null;
-    const scenes: string[] = isVid && Array.isArray(src?.scene_prompts) ? src.scene_prompts : src?.prompt ? [src.prompt] : [];
-    const media = isVid ? src?.video_url : src?.image_url;
-
+    const isVideo  = r.content_type === "video";
+    const src: any = isVideo ? vidMap.get(r.content_id) : imgMap.get(r.content_id);
+    const char: any= src?.character_id ? charMap.get(src.character_id) : null;
+    const scenes   = isVideo && Array.isArray(src?.scene_prompts) ? src.scene_prompts : src?.prompt ? [src.prompt] : [];
+    const media    = isVideo ? src?.video_url : src?.image_url;
+    const thumb    = char?.reference_image_url || media || PLACEHOLDER;
     const status: PublishStatus =
-      r.status === "published" ? "published" : r.status === "failed" ? "failed" :
-      r.status === "publishing" ? "publishing" : "scheduled";
+      r.status === "published" ? "published" : r.status === "failed" ? "failed" : r.status === "publishing" ? "publishing" : "scheduled";
     const queueStatus: QueueStatus =
-      status === "published" ? "published" : status === "failed" ? "failed" :
-      status === "publishing" ? "publishing" :
+      status === "published" ? "published" : status === "failed" ? "failed" : status === "publishing" ? "publishing" :
       new Date(r.publish_time) <= new Date() ? "ready" : "waiting";
-
     return {
       id: r.id,
-      contentName: `${char?.name ?? "Lila"} — ${(scenes[0] ?? "Untitled").slice(0,40)}`,
+      contentName: `${char?.name ?? "Lila"} — ${(scenes[0] ?? "Untitled").slice(0, 40)}`,
       type: r.content_type, character: char?.name ?? "Lila",
-      thumbnail: char?.reference_image_url || media || PLACEHOLDER,
-      mediaUrl: media || "",
+      thumbnail: thumb, mediaUrl: media || "",
       scheduledAt: r.publish_time, status, queueStatus, autoPublish: true,
       externalPostId: src?.external_post_id ?? undefined,
       publishedAt: src?.published_at ?? undefined,
@@ -467,95 +507,90 @@ async function fetchSchedules(): Promise<ScheduledItem[]> {
 }
 
 async function fetchApprovedAssets() {
-  const [imgRes, vidRes, charRes] = await Promise.all([
+  const [imgR, vidR, charR] = await Promise.all([
     supabase.from("images").select("id,image_url,prompt,character_id").eq("status","approved"),
     supabase.from("videos").select("id,video_url,prompt,character_id").eq("status","approved"),
     supabase.from("characters").select("id,name,reference_image_url"),
   ]);
-  const cm = new Map((charRes.data ?? []).map((c: any) => [c.id, c]));
+  const charMap = new Map((charR.data ?? []).map((c: any) => [c.id, c]));
   return [
-    ...(imgRes.data ?? []).map((i: any) => ({
-      id: i.id, type: "image" as const,
-      name: `${cm.get(i.character_id)?.name ?? "Lila"} — ${(i.prompt ?? "Image").slice(0,40)}`,
-      mediaUrl: i.image_url ?? "", thumbnail: i.image_url ?? "",
-    })),
-    ...(vidRes.data ?? []).map((v: any) => ({
-      id: v.id, type: "video" as const,
-      name: `${cm.get(v.character_id)?.name ?? "Lila"} — ${(v.prompt ?? "Video").slice(0,40)}`,
-      mediaUrl: v.video_url ?? "", thumbnail: cm.get(v.character_id)?.reference_image_url ?? "",
-    })),
+    ...(imgR.data ?? []).map((i: any) => ({ id: i.id, type: "image" as const, name: `${charMap.get(i.character_id)?.name ?? "Lila"} — ${(i.prompt ?? "Image").slice(0, 40)}`, thumbnail: i.image_url ?? "" })),
+    ...(vidR.data ?? []).map((v: any) => ({ id: v.id, type: "video" as const, name: `${charMap.get(v.character_id)?.name ?? "Lila"} — ${(v.prompt ?? "Video").slice(0, 40)}`, thumbnail: charMap.get(v.character_id)?.reference_image_url ?? "" })),
   ];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// UI helpers
+// Style helpers
 // ─────────────────────────────────────────────────────────────────────────────
-const statusCls: Record<PublishStatus,string> = {
-  scheduled:"bg-chart-2/15 text-chart-2 border-chart-2/30",
+const statusStyle: Record<PublishStatus, string> = {
+  scheduled: "bg-chart-2/15 text-chart-2 border-chart-2/30",
   publishing:"bg-primary/15 text-primary border-primary/30",
-  published:"bg-success/15 text-success border-success/30",
-  failed:"bg-destructive/15 text-destructive border-destructive/30",
+  published: "bg-success/15 text-success border-success/30",
+  failed:    "bg-destructive/15 text-destructive border-destructive/30",
 };
-const queueCls: Record<QueueStatus,string> = {
-  waiting:"bg-muted text-muted-foreground border-border",
-  ready:"bg-chart-2/15 text-chart-2 border-chart-2/30",
+const queueStyle: Record<QueueStatus, string> = {
+  waiting:   "bg-muted text-muted-foreground border-border",
+  ready:     "bg-chart-2/15 text-chart-2 border-chart-2/30",
   publishing:"bg-primary/15 text-primary border-primary/30",
-  published:"bg-success/15 text-success border-success/30",
-  failed:"bg-destructive/15 text-destructive border-destructive/30",
+  published: "bg-success/15 text-success border-success/30",
+  failed:    "bg-destructive/15 text-destructive border-destructive/30",
 };
-const logCls: Record<LogLevel,string> = {
-  info:"text-muted-foreground", warn:"text-yellow-400", error:"text-red-400 font-semibold", ok:"text-green-400",
+const logStyle: Record<LogLevel, string> = {
+  info:    "text-muted-foreground",
+  warn:    "text-yellow-400",
+  error:   "text-red-400 font-semibold",
+  success: "text-green-400",
 };
-
-const ft  = (s: string) => new Date(s).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
-const fd  = (s: string) => new Date(s).toLocaleDateString([],{month:"short",day:"numeric"});
-const fdt = (s: string) => `${fd(s)} · ${ft(s)}`;
+const fmtT = (s: string) => new Date(s).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});
+const fmtD = (s: string) => new Date(s).toLocaleDateString([], {month:"short",day:"numeric"});
+const fmtDT= (s: string) => `${fmtD(s)} · ${fmtT(s)}`;
 const sameDay = (a: Date, b: Date) => a.getFullYear()===b.getFullYear()&&a.getMonth()===b.getMonth()&&a.getDate()===b.getDate();
 
-function SBadge({status}:{status:PublishStatus}) {
-  return <span className={cn("inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider",statusCls[status])}>
+function StatusBadge({status}: {status: PublishStatus}) {
+  return <span className={cn("inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider", statusStyle[status])}>
     {status==="publishing"&&<Loader2 className="h-2.5 w-2.5 animate-spin"/>}{status}
   </span>;
 }
-function QBadge({status}:{status:QueueStatus}) {
-  return <span className={cn("inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider",queueCls[status])}>{status}</span>;
+function QueueBadge({status}: {status: QueueStatus}) {
+  return <span className={cn("inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider", queueStyle[status])}>{status}</span>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Debug panel (collapsible bottom bar)
+// Debug panel — sticky bottom bar
 // ─────────────────────────────────────────────────────────────────────────────
-function DebugPanel({logs,onClear}:{logs:LogEntry[];onClear:()=>void}) {
-  const [open,setOpen] = useState(false);
-  const errCount = logs.filter(l=>l.level==="error").length;
+function DebugPanel({ logs, onClear }: { logs: LogEntry[]; onClear: () => void }) {
+  const [open, setOpen] = useState(false);
+  const errorCount = logs.filter(l => l.level === "error").length;
   return (
     <div className="fixed bottom-0 left-0 right-0 z-50 pointer-events-none">
       <div className="pointer-events-auto mx-auto max-w-[1400px] px-4 sm:px-6 lg:px-8">
-        <div className={cn("rounded-t-xl border border-border/80 bg-card shadow-2xl transition-all",open?"max-h-80":"max-h-10")}>
-          <button type="button" onClick={()=>setOpen(o=>!o)}
-            className="flex w-full items-center gap-2 px-4 py-2 hover:bg-muted/30 rounded-t-xl">
-            <Bug className="h-3.5 w-3.5 text-muted-foreground"/>
-            <span className="text-xs font-medium text-muted-foreground">Publish Debug Log</span>
-            {errCount>0&&<span className="rounded bg-destructive/15 border border-destructive/30 px-1.5 py-0.5 text-[10px] font-semibold text-destructive">{errCount} error{errCount!==1?"s":""}</span>}
-            {logs.length>0&&errCount===0&&<span className="text-[10px] text-muted-foreground">{logs.length} entries</span>}
+        <div className={cn("rounded-t-xl border border-border/80 bg-card shadow-2xl transition-all", open ? "max-h-80" : "max-h-10")}>
+          <button type="button" onClick={() => setOpen(o => !o)}
+            className="flex w-full items-center gap-2 px-4 py-2 text-left hover:bg-muted/40 rounded-t-xl">
+            <Bug className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0"/>
+            <span className="text-xs font-medium text-muted-foreground">Fanvue Publish Log</span>
+            {errorCount > 0 && <span className="rounded bg-destructive/15 border border-destructive/30 px-1.5 py-0.5 text-[10px] font-semibold text-destructive">{errorCount} error{errorCount!==1?"s":""}</span>}
+            {logs.length > 0 && errorCount === 0 && <span className="text-[10px] text-muted-foreground">{logs.length} entries</span>}
             <div className="ml-auto flex items-center gap-2">
-              {open&&<button type="button" onClick={e=>{e.stopPropagation();onClear();}} className="text-[10px] text-muted-foreground hover:text-foreground px-1">Clear</button>}
-              {open?<ChevronDown className="h-3.5 w-3.5 text-muted-foreground"/>:<ChevronUp className="h-3.5 w-3.5 text-muted-foreground"/>}
+              {open && <button type="button" onClick={e=>{e.stopPropagation();onClear();}} className="text-[10px] text-muted-foreground hover:text-foreground px-1">Clear</button>}
+              {open ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground"/> : <ChevronUp className="h-3.5 w-3.5 text-muted-foreground"/>}
             </div>
           </button>
-          {open&&(
-            <div className="h-64 overflow-y-auto border-t border-border/60 bg-background/90 font-mono">
-              {logs.length===0
-                ?<p className="p-4 text-xs text-muted-foreground">No events yet. Click "Publish now" to see step-by-step output.</p>
-                :logs.map((l,i)=>(
-                  <div key={i} className="flex items-start gap-2 border-b border-border/20 px-3 py-1">
-                    <span className="shrink-0 text-[10px] text-muted-foreground/50 tabular-nums">{new Date(l.at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"})}</span>
-                    <span className={cn("shrink-0 w-12 text-[10px]",logCls[l.level])}>[{l.level.toUpperCase()}]</span>
+          {open && (
+            <div className="h-64 overflow-y-auto border-t border-border/60 bg-black/90 font-mono">
+              {logs.length === 0
+                ? <p className="p-4 text-xs text-muted-foreground">No entries yet. Click "Publish now" to see step-by-step output.</p>
+                : logs.map((l, i) => (
+                  <div key={i} className="flex items-start gap-2 border-b border-white/5 px-3 py-1">
+                    <span className="shrink-0 text-[10px] text-white/30 tabular-nums pt-px">{new Date(l.at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"})}</span>
+                    <span className={cn("shrink-0 text-[10px] w-16", logStyle[l.level])}>[{l.level.toUpperCase()}]</span>
                     <div className="min-w-0 flex-1">
-                      <span className={cn("text-[11px]",logCls[l.level])}>{l.msg}</span>
-                      {l.detail&&<p className="mt-0.5 break-all text-[10px] text-muted-foreground/60">{l.detail}</p>}
+                      <span className={cn("text-[11px]", logStyle[l.level])}>{l.msg}</span>
+                      {l.detail && <p className="mt-0.5 break-all text-[10px] text-white/40">{l.detail}</p>}
                     </div>
                   </div>
-                ))}
+                ))
+              }
             </div>
           )}
         </div>
@@ -565,126 +600,31 @@ function DebugPanel({logs,onClear}:{logs:LogEntry[];onClear:()=>void}) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Quick-post-by-URL dialog  (paste any CloudFront/Supabase URL → post to Fanvue)
-// ─────────────────────────────────────────────────────────────────────────────
-function QuickPostDialog({open,onOpenChange,token}:{open:boolean;onOpenChange:(o:boolean)=>void;token:FvToken|null}) {
-  const [url,setUrl]       = useState("");
-  const [caption,setCaption] = useState("");
-  const [busy,setBusy]     = useState(false);
-  const [lastPost,setLastPost] = useState<string|null>(null);
-
-  const detectedType = isVideoUrl(url) ? "video" : isImageUrl(url) ? "image" : null;
-
-  const handlePost = async () => {
-    if (!token) { toast.error("Connect your Fanvue account first"); return; }
-    if (!url.trim()) { toast.error("Enter a media URL"); return; }
-    if (!detectedType) { toast.error("URL must end in .jpg/.jpeg/.png/.mp4 etc."); return; }
-    setBusy(true);
-    const tid = "quick-post";
-    toast.loading("Posting to Fanvue…",{id:tid,duration:Infinity});
-    try {
-      const postUuid = await publishToFanvue({
-        token: token.accessToken,
-        mediaUrl: url.trim(),
-        mediaType: detectedType,
-        caption: caption.trim() || "New post from Lila Studio",
-        onProgress: s => toast.loading(s,{id:tid,duration:Infinity}),
-      });
-      setLastPost(postUuid);
-      toast.success("Posted to Fanvue!",{
-        id:tid,duration:12_000,
-        description:`Post UUID: ${postUuid}`,
-        action:{label:"View",onClick:()=>window.open(`https://www.fanvue.com/post/${postUuid}`,"_blank")},
-      });
-      setUrl(""); setCaption("");
-    } catch(e:any) {
-      le("Quick-post failed",e.message);
-      toast.error("Post failed — check debug log",{id:tid,description:e.message.slice(0,200),duration:15_000});
-    } finally { setBusy(false); }
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2"><LinkIcon className="h-4 w-4"/> Quick post by URL</DialogTitle>
-          <DialogDescription>
-            Paste any publicly-accessible image or video URL (Supabase, CloudFront, etc.) and post it directly to your Fanvue account.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-4">
-          <div className="space-y-1.5">
-            <Label>Media URL</Label>
-            <Input
-              value={url} onChange={e=>setUrl(e.target.value)}
-              placeholder="https://d2p7pge43lyniu.cloudfront.net/output/…jpeg"
-            />
-            {url && (
-              <p className={cn("text-[11px]", detectedType ? "text-success" : "text-warning")}>
-                {detectedType ? `✓ Detected as ${detectedType}` : "⚠ Cannot detect type from URL extension"}
-              </p>
-            )}
-          </div>
-          <div className="space-y-1.5">
-            <Label>Caption (optional)</Label>
-            <Input value={caption} onChange={e=>setCaption(e.target.value)} placeholder="Check out my latest content!" />
-          </div>
-          {!token && (
-            <div className="flex items-center gap-2 rounded-md border border-warning/30 bg-warning/5 p-3">
-              <AlertTriangle className="h-4 w-4 text-warning flex-shrink-0"/>
-              <p className="text-xs">Connect your Fanvue account first (top-right button).</p>
-            </div>
-          )}
-          {token && (
-            <div className="flex items-center gap-2 rounded-md border border-border bg-muted/30 p-3">
-              <span className="h-2 w-2 rounded-full bg-success flex-shrink-0"/>
-              <span className="text-xs">Posting as <strong>@{token.handle}</strong> ({token.name})</span>
-            </div>
-          )}
-          {lastPost && (
-            <div className="rounded-md border border-success/30 bg-success/5 p-3">
-              <p className="text-xs font-medium text-success">Last post: {lastPost}</p>
-              <a href={`https://www.fanvue.com/post/${lastPost}`} target="_blank" rel="noopener noreferrer"
-                className="mt-1 inline-flex items-center gap-1 text-xs text-primary hover:underline">
-                <ExternalLink className="h-3 w-3"/> View on Fanvue
-              </a>
-            </div>
-          )}
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={()=>onOpenChange(false)}>Close</Button>
-          <Button onClick={handlePost} disabled={busy||!url||!detectedType||!token} className="gap-2">
-            {busy?<Loader2 className="h-4 w-4 animate-spin"/>:<Send className="h-4 w-4"/>}
-            {busy?"Posting…":"Post to Fanvue"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Account dialog
 // ─────────────────────────────────────────────────────────────────────────────
-function AccountDialog({open,onOpenChange,token,onDisconnect}:{
-  open:boolean;onOpenChange:(o:boolean)=>void;token:FvToken|null;onDisconnect:()=>void;
+function AccountDialog({ open, onOpenChange, token, onDisconnect }: {
+  open: boolean; onOpenChange: (o: boolean) => void; token: StoredToken | null; onDisconnect: () => void;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Fanvue Account</DialogTitle>
-          <DialogDescription>Connect your Fanvue creator account to publish content from Lila Studio.</DialogDescription>
+          <DialogDescription>Connect your Fanvue creator account to publish content from Lila Studio. Your token is stored locally in the browser — no server required.</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           {token ? (
-            <div className="flex items-center justify-between rounded-lg border border-border bg-card p-3">
+            <div className="flex items-center justify-between rounded-lg border border-success/30 bg-success/5 p-3">
               <div className="flex items-center gap-3">
                 <div className="grid h-9 w-9 place-items-center rounded-full bg-primary/10 text-primary font-semibold text-sm">{token.name.slice(0,1).toUpperCase()}</div>
                 <div>
                   <p className="text-sm font-medium">{token.name}</p>
                   <p className="text-xs text-muted-foreground">@{token.handle}</p>
-                  {token.expiresAt&&<p className={cn("text-[10px]",token.expiresAt<Date.now()?"text-destructive":"text-muted-foreground")}>{token.expiresAt<Date.now()?"⚠ Token expired — reconnect":"✓ Token valid"}</p>}
+                  {token.expiresAt && (
+                    <p className={cn("text-[10px]", token.expiresAt < Date.now() ? "text-destructive" : "text-success")}>
+                      {token.expiresAt < Date.now() ? "⚠ Token expired — reconnect" : `Expires ${new Date(token.expiresAt).toLocaleDateString()}`}
+                    </p>
+                  )}
                 </div>
               </div>
               <div className="flex items-center gap-2">
@@ -696,27 +636,20 @@ function AccountDialog({open,onOpenChange,token,onDisconnect}:{
             <div className="rounded-lg border border-dashed border-border bg-muted/30 p-6 text-center">
               <Plug className="mx-auto h-8 w-8 text-muted-foreground"/>
               <p className="mt-2 text-sm font-medium">No account connected</p>
-              <p className="mt-1 text-xs text-muted-foreground">Connect your Fanvue creator account to start publishing.</p>
+              <p className="mt-1 text-xs text-muted-foreground">Connect your Fanvue creator account to publish.</p>
             </div>
           )}
           <div className="rounded-lg border border-border bg-muted/20 p-4">
-            <p className="text-xs font-medium mb-1">{token?"Reconnect account":"Connect account"}</p>
+            <p className="text-xs font-medium mb-1">{token ? "Reconnect account" : "Connect Fanvue"}</p>
             <p className="text-xs text-muted-foreground mb-3">
-              Your token is saved in your browser's localStorage — no server needed. You'll be redirected to Fanvue then back here automatically.
+              You'll be redirected to Fanvue to authorise access (PKCE OAuth). After approving, you'll land back here automatically with your token saved.
             </p>
-            <Button className="w-full gap-2" onClick={()=>{onOpenChange(false);startOAuth();}}>
-              <ExternalLink className="h-4 w-4"/> {token?"Reconnect Fanvue":"Connect Fanvue Account"}
+            <Button className="w-full gap-2" onClick={() => { onOpenChange(false); startFanvueOAuth(); }}>
+              <ExternalLink className="h-4 w-4"/> {token ? "Reconnect Fanvue Account" : "Connect Fanvue Account"}
             </Button>
           </div>
-          {token && (
-            <div className="rounded-lg border border-border bg-muted/10 p-3">
-              <p className="text-[11px] font-medium text-muted-foreground mb-1">Token scopes granted</p>
-              <p className="text-[10px] text-muted-foreground">read:self · read:media · write:media · write:post</p>
-              <p className="text-[10px] text-muted-foreground/60 mt-1">If publishing fails with 403, reconnect to re-grant all scopes.</p>
-            </div>
-          )}
         </div>
-        <DialogFooter><Button variant="outline" onClick={()=>onOpenChange(false)}>Close</Button></DialogFooter>
+        <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>Close</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   );
@@ -727,143 +660,191 @@ function AccountDialog({open,onOpenChange,token,onDisconnect}:{
 // ─────────────────────────────────────────────────────────────────────────────
 function SchedulePage() {
   const queryClient = useQueryClient();
-  const {data:scheduleData=EMPTY} = useQuery({queryKey:["schedules"],queryFn:fetchSchedules,staleTime:10_000});
-  const [items,setItems]       = useState<ScheduledItem[]>([]);
-  const [token,setToken]       = useState<FvToken|null>(()=>loadToken());
-  const {logs,clearLogs}       = useDebugLog();
-  useEffect(()=>setItems(scheduleData),[scheduleData]);
+  const { data: scheduleData = EMPTY } = useQuery({ queryKey: ["schedules"], queryFn: fetchSchedules, staleTime: 10_000 });
+  const [items, setItems]           = useState<ScheduledItem[]>([]);
+  const [fanvueToken, setFanvueToken] = useState<StoredToken | null>(() => loadToken());
+  const { logs, clearLogs }         = useDebugLog();
+  useEffect(() => setItems(scheduleData), [scheduleData]);
 
-  // OAuth redirect handler
-  useEffect(()=>{
-    const p   = new URLSearchParams(window.location.search);
-    const code = p.get("code");
-    const err  = p.get("error");
-    if(err){ window.history.replaceState({},"",window.location.pathname); toast.error(`Fanvue error: ${p.get("error_description")??err}`); return; }
-    if(!code) return;
-    window.history.replaceState({},"",window.location.pathname);
-    toast.loading("Connecting…",{id:"fv"});
-    exchangeCode(code)
-      .then(t=>{ setToken(t); toast.success(`Connected as @${t.handle}!`,{id:"fv"}); })
-      .catch(e=>{ le("OAuth failed",e.message); toast.error(e.message,{id:"fv"}); });
+  // ── Handle OAuth callback ─────────────────────────────────────────────────
+  // When Fanvue redirects back with ?code=..., exchange it for a token.
+  // This runs once on mount. We replace the URL immediately so a refresh
+  // doesn't re-trigger the exchange.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const code   = params.get("code");
+    const err    = params.get("error");
+
+    if (err) {
+      window.history.replaceState({}, "", window.location.pathname);
+      dbgE(`OAuth error: ${params.get("error_description") ?? err}`);
+      toast.error(`Fanvue auth error: ${params.get("error_description") ?? err}`);
+      return;
+    }
+    if (!code) return;
+
+    // Remove ?code from URL so refresh doesn't re-trigger
+    window.history.replaceState({}, "", window.location.pathname);
+
+    toast.loading("Connecting Fanvue account…", { id: "fv-connect" });
+    exchangeFanvueCode(code)
+      .then(t => {
+        setFanvueToken(t);
+        toast.success(`✅ Connected as ${t.name} (@${t.handle})`, { id: "fv-connect", duration: 8000 });
+      })
+      .catch(e => {
+        dbgE("OAuth exchange failed", e.message);
+        toast.error(e.message ?? "Failed to connect", { id: "fv-connect", duration: 10000 });
+      });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[]);
+  }, []);
 
   // Realtime
-  useEffect(()=>{
-    const ch=supabase.channel("sched-rt").on("postgres_changes",{event:"*",schema:"public",table:"schedules"},()=>queryClient.invalidateQueries({queryKey:["schedules"]})).subscribe();
-    return ()=>{supabase.removeChannel(ch);};
-  },[queryClient]);
+  useEffect(() => {
+    const ch = supabase.channel("schedules-rt")
+      .on("postgres_changes", {event:"*",schema:"public",table:"schedules"}, () => queryClient.invalidateQueries({queryKey:["schedules"]}))
+      .subscribe();
+    return () => { supabase.removeChannel(ch); };
+  }, [queryClient]);
 
-  const [tab,setTab]           = useState("calendar");
-  const [search,setSearch]     = useState("");
-  const [sf,setSf]             = useState<"all"|PublishStatus>("all");
-  const [rf,setRf]             = useState<"all"|"today"|"week"|"month">("all");
-  const [selected,setSelected] = useState<ScheduledItem|null>(null);
-  const [createOpen,setCreateOpen]   = useState(false);
-  const [accountOpen,setAccountOpen] = useState(false);
-  const [quickOpen,setQuickOpen]     = useState(false);
-  const [weekStart,setWeekStart]     = useState(()=>{ const d=new Date(); d.setHours(0,0,0,0); d.setDate(d.getDate()-d.getDay()); return d; });
+  const [tab,         setTab]         = useState("calendar");
+  const [search,      setSearch]      = useState("");
+  const [statusFilter,setStatusFilter]= useState<"all"|PublishStatus>("all");
+  const [rangeFilter, setRangeFilter] = useState<"all"|"today"|"week"|"month">("all");
+  const [selected,    setSelected]    = useState<ScheduledItem|null>(null);
+  const [createOpen,  setCreateOpen]  = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [weekStart,   setWeekStart]   = useState(() => { const d=new Date();d.setHours(0,0,0,0);d.setDate(d.getDate()-d.getDay());return d; });
 
-  const stats = useMemo(()=>{
+  const stats = useMemo(() => {
     const now=new Date(); const wa=new Date(now); wa.setDate(wa.getDate()-7);
     return {
       scheduled:     items.filter(i=>i.status==="scheduled").length,
-      today:         items.filter(i=>i.status==="scheduled"&&sameDay(new Date(i.scheduledAt),now)).length,
+      todayCount:    items.filter(i=>i.status==="scheduled"&&sameDay(new Date(i.scheduledAt),now)).length,
       weekPublished: items.filter(i=>i.status==="published"&&i.publishedAt&&new Date(i.publishedAt)>=wa).length,
       failed:        items.filter(i=>i.status==="failed").length,
     };
-  },[items]);
+  }, [items]);
 
-  const filtered = useMemo(()=>{
+  const filtered = useMemo(() => {
     const now=new Date();
-    return items.filter(i=>{
-      if(sf!=="all"&&i.status!==sf) return false;
-      if(rf!=="all"){
+    return items.filter(i => {
+      if (statusFilter!=="all"&&i.status!==statusFilter) return false;
+      if (rangeFilter!=="all") {
         const d=new Date(i.scheduledAt);
-        if(rf==="today"&&!sameDay(d,now)) return false;
-        if(rf==="week"){const wk=new Date(now);wk.setDate(wk.getDate()+7);if(d<now||d>wk)return false;}
-        if(rf==="month"&&(d.getMonth()!==now.getMonth()||d.getFullYear()!==now.getFullYear()))return false;
+        if (rangeFilter==="today"&&!sameDay(d,now)) return false;
+        if (rangeFilter==="week") { const wk=new Date(now);wk.setDate(wk.getDate()+7);if(d<now||d>wk)return false; }
+        if (rangeFilter==="month"&&(d.getMonth()!==now.getMonth()||d.getFullYear()!==now.getFullYear())) return false;
       }
-      if(search.trim()){const q=search.toLowerCase();if(![i.contentName,i.character].join(" ").toLowerCase().includes(q))return false;}
+      if (search.trim()) { const q=search.toLowerCase(); if(![i.contentName,i.character].join(" ").toLowerCase().includes(q)) return false; }
       return true;
     });
-  },[items,sf,rf,search]);
+  }, [items, statusFilter, rangeFilter, search]);
 
-  const upd = (id:string,patch:Partial<ScheduledItem>) => setItems(p=>p.map(i=>i.id===id?{...i,...patch}:i));
+  const updateItem = (id: string, patch: Partial<ScheduledItem>) =>
+    setItems(prev => prev.map(i => i.id===id ? {...i,...patch} : i));
 
-  const remove = async(id:string)=>{
-    setItems(p=>p.filter(i=>i.id!==id)); setSelected(null);
-    try{ const{error}=await supabase.from("schedules").delete().eq("id",id); if(error)throw error; toast.success("Removed"); queryClient.invalidateQueries({queryKey:["schedules"]}); }
+  const removeItem = async (id: string) => {
+    setItems(prev => prev.filter(i => i.id!==id)); setSelected(null);
+    try { const{error}=await supabase.from("schedules").delete().eq("id",id); if(error)throw error; toast.success("Schedule removed"); queryClient.invalidateQueries({queryKey:["schedules"]}); }
     catch(e:any){toast.error(e?.message??"Failed");}
   };
 
-  const retry = async(id:string)=>{
-    upd(id,{status:"scheduled",queueStatus:"ready"});
-    try{await scheduleService.update(id,{status:"scheduled"});toast.success("Queued for retry");}
+  const retryPublish = async (id: string) => {
+    updateItem(id, {status:"scheduled",queueStatus:"ready"});
+    try { await scheduleService.update(id,{status:"scheduled"}); toast.success("Queued for retry"); }
     catch(e:any){toast.error(e?.message??"Failed");}
   };
 
-  const publishNow = async(id:string)=>{
-    const item=items.find(i=>i.id===id); if(!item) return;
-    const t=loadToken();
-    if(!t?.accessToken){
-      toast.error("No Fanvue account connected",{action:{label:"Connect",onClick:()=>setAccountOpen(true)},duration:8_000});
+  // ── PUBLISH NOW ──────────────────────────────────────────────────────────
+  const publishNow = async (id: string) => {
+    const item = items.find(i => i.id===id);
+    if (!item) return;
+
+    // Load token fresh from localStorage each time (catches reconnects)
+    const token = loadToken();
+    if (!token?.accessToken) {
+      dbgE("No Fanvue token in localStorage");
+      toast.error("No Fanvue account connected.", {
+        description: "Click the account button at the top to connect your Fanvue account first.",
+        action: { label:"Connect", onClick:()=>setAccountOpen(true) },
+        duration: 10_000,
+      });
       return;
     }
-    if(!item.mediaUrl){ toast.error("No media URL — asset may still be processing in Supabase"); return; }
+    if (!item.mediaUrl) {
+      dbgE("No mediaUrl on item", JSON.stringify({id:item.id,type:item.type}));
+      toast.error("No media URL for this item — the asset may still be processing or the URL is missing in Supabase.");
+      return;
+    }
 
-    li(`Publishing item ${id}`,`type=${item.type} url=${item.mediaUrl}`);
-    upd(id,{status:"publishing",queueStatus:"publishing"});
-    const tid=`pub-${id}`;
-    toast.loading("Starting publish…",{id:tid,duration:Infinity});
+    dbg(`Publishing item ${id}`, `type=${item.type} mediaUrl=${item.mediaUrl}`);
+    updateItem(id, {status:"publishing", queueStatus:"publishing"});
+    const tid = `pub-${id}`;
+    toast.loading("Starting Fanvue publish…", {id:tid, duration:Infinity});
 
-    try{
+    try {
+      const caption  = item.scenePrompts[0] ?? item.contentName;
       const postUuid = await publishToFanvue({
-        token:       t.accessToken,
-        mediaUrl:    item.mediaUrl,
-        mediaType:   item.type,
-        caption:     item.scenePrompts[0] ?? item.contentName,
-        onProgress:  s=>toast.loading(s,{id:tid,duration:Infinity}),
+        token,
+        mediaUrl:   item.mediaUrl,
+        mediaType:  item.type,
+        caption,
+        onProgress: s => toast.loading(s, {id:tid, duration:Infinity}),
       });
 
-      const now=new Date().toISOString();
-      const table=item.type==="image"?"images":"videos";
-      const{data:sr}=await supabase.from("schedules").select("content_id").eq("id",id).single();
-      if(sr?.content_id){
-        const{error:ue}=await supabase.from(table).update({publish_status:"published",published_at:now,external_post_id:postUuid}).eq("id",sr.content_id);
-        if(ue) lw("Supabase asset update error",ue.message); else lok("Supabase asset updated");
+      const now   = new Date().toISOString();
+      const table = item.type==="image" ? "images" : "videos";
+      const{data:schedRow} = await supabase.from("schedules").select("content_id").eq("id",id).single();
+      if (schedRow?.content_id) {
+        const upd = await supabase.from(table).update({
+          publish_status: "published",
+          published_at:   now,
+          external_post_id: postUuid,
+        }).eq("id", schedRow.content_id);
+        if (upd.error) dbgW("Supabase asset update failed", upd.error.message);
+        else dbgOk("Supabase asset row updated");
       }
-      await scheduleService.update(id,{status:"published"});
-      upd(id,{status:"published",queueStatus:"published",externalPostId:postUuid,publishedAt:now,
-        history:[...item.history,{at:now,label:`Published to @${t.handle}`,kind:"published"}]});
+      await scheduleService.update(id, {status:"published"});
 
-      toast.success(`✅ Published to @${t.handle}!`,{
-        id:tid,duration:12_000,description:`Post UUID: ${postUuid}`,
-        action:{label:"View on Fanvue",onClick:()=>window.open(`https://www.fanvue.com/post/${postUuid}`,"_blank")},
+      updateItem(id, {
+        status:"published", queueStatus:"published",
+        externalPostId:postUuid, publishedAt:now,
+        history:[...item.history, {at:now, label:`Published to @${token.handle}`, kind:"published"}],
+      });
+
+      toast.success(`🎉 Published to @${token.handle}!`, {
+        id:tid, duration:12_000,
+        description:`Post UUID: ${postUuid}`,
+        action:{ label:"View on Fanvue", onClick:()=>window.open(`https://www.fanvue.com/post/${postUuid}`,"_blank") },
       });
       queryClient.invalidateQueries({queryKey:["schedules"]});
 
-    }catch(e:any){
-      le("Publish FAILED",e.message);
-      upd(id,{status:"failed",queueStatus:"failed",
-        history:[...item.history,{at:new Date().toISOString(),label:`Failed: ${e.message.slice(0,100)}`,kind:"failed"}]});
-      try{await scheduleService.update(id,{status:"failed"});}catch{}
-      toast.error("Publish failed — open debug log ↓",{id:tid,description:e.message.slice(0,200),duration:20_000});
+    } catch(e:any) {
+      const msg = e?.message ?? "Unknown error";
+      dbgE("Publish FAILED", msg);
+      updateItem(id, {
+        status:"failed", queueStatus:"failed",
+        history:[...item.history, {at:new Date().toISOString(), label:`Failed: ${msg.slice(0,120)}`, kind:"failed"}],
+      });
+      try { await scheduleService.update(id,{status:"failed"}); } catch {}
+      toast.error("Publish failed — check debug log below", {id:tid, duration:20_000, description:msg.slice(0,200)});
     }
   };
 
-  const [dragId,setDragId]=useState<string|null>(null);
-  const onDrop=async(day:Date)=>{
-    if(!dragId) return;
-    const item=items.find(i=>i.id===dragId); if(!item) return;
-    const nd=new Date(day); const od=new Date(item.scheduledAt);
-    nd.setHours(od.getHours(),od.getMinutes(),0,0);
-    const iso=nd.toISOString();
-    upd(dragId,{scheduledAt:iso});
-    try{await scheduleService.update(dragId,{publish_time:iso});toast.success("Rescheduled");}
+  const [dragId,setDragId] = useState<string|null>(null);
+  const onDropOnDay = async (day: Date) => {
+    if (!dragId) return;
+    const item=items.find(i=>i.id===dragId); if(!item)return;
+    const d=new Date(day); const old=new Date(item.scheduledAt); d.setHours(old.getHours(),old.getMinutes(),0,0);
+    const iso=d.toISOString();
+    updateItem(dragId,{scheduledAt:iso});
+    try{await scheduleService.update(dragId,{publish_time:iso});toast.success("Schedule updated");}
     catch(e:any){toast.error(e?.message??"Failed");}
     setDragId(null);
   };
+
+  const connected = !!fanvueToken;
 
   return (
     <SidebarProvider>
@@ -876,20 +857,22 @@ function SchedulePage() {
             {/* Header */}
             <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
               <div>
-                <Link to="/" className="mb-3 inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"><ArrowLeft className="h-3.5 w-3.5"/> Dashboard</Link>
+                <Link to="/" className="mb-3 inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground">
+                  <ArrowLeft className="h-3.5 w-3.5"/> Dashboard
+                </Link>
                 <h1 className="font-display text-3xl font-semibold tracking-tight">Scheduling</h1>
-                <p className="mt-1 text-sm text-muted-foreground">Plan, queue and publish content to your Fanvue account.</p>
+                <p className="mt-1 text-sm text-muted-foreground">Plan, queue and publish approved content to your Fanvue account.</p>
               </div>
-              <div className="flex flex-wrap items-center gap-2">
-                {/* Quick-post by URL button */}
-                <Button variant="outline" size="sm" className="gap-2" onClick={()=>setQuickOpen(true)}>
-                  <LinkIcon className="h-4 w-4"/> Post by URL
-                </Button>
+              <div className="flex items-center gap-2">
                 <Button variant="outline" size="sm" className="gap-2" onClick={()=>setAccountOpen(true)}>
                   <Plug className="h-4 w-4"/>
-                  {token
-                    ?<span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-success"/><span className="max-w-[120px] truncate">{token.name}</span></span>
-                    :"Connect Fanvue"}
+                  {connected ? (
+                    <span className="flex items-center gap-1.5">
+                      <span className="h-2 w-2 rounded-full bg-success"/>
+                      <span className="max-w-[140px] truncate font-medium">{fanvueToken!.name}</span>
+                      <span className="text-muted-foreground text-xs">@{fanvueToken!.handle}</span>
+                    </span>
+                  ) : "Connect Fanvue"}
                 </Button>
                 <Button size="sm" className="gap-2" onClick={()=>setCreateOpen(true)}>
                   <CalendarPlus className="h-4 w-4"/> Schedule content
@@ -897,20 +880,23 @@ function SchedulePage() {
               </div>
             </div>
 
-            {!token&&(
+            {/* No account warning */}
+            {!connected && (
               <div className="flex items-center gap-3 rounded-lg border border-warning/30 bg-warning/5 px-4 py-3">
-                <AlertTriangle className="h-4 w-4 shrink-0 text-warning"/>
-                <p className="flex-1 text-sm">No Fanvue account connected. Connect one to start publishing.</p>
-                <Button size="sm" variant="outline" className="gap-1.5" onClick={()=>setAccountOpen(true)}><ExternalLink className="h-3.5 w-3.5"/> Connect now</Button>
+                <AlertTriangle className="h-4 w-4 flex-shrink-0 text-warning"/>
+                <p className="flex-1 text-sm">No Fanvue account connected. Connect one to publish content.</p>
+                <Button size="sm" variant="outline" className="gap-1.5" onClick={()=>setAccountOpen(true)}>
+                  <ExternalLink className="h-3.5 w-3.5"/> Connect now
+                </Button>
               </div>
             )}
 
             {/* Stats */}
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <DashboardCard label="Scheduled" value={stats.scheduled} icon={CalendarClock} accent="primary" hint="Awaiting publish"/>
-              <DashboardCard label="Today"     value={stats.today}     icon={Clock}         accent="chart-2" hint="Next 24h"/>
-              <DashboardCard label="This week" value={stats.weekPublished} icon={CheckCircle2} accent="chart-3"/>
-              <DashboardCard label="Failed"    value={stats.failed}    icon={AlertTriangle} accent="chart-5" hint={stats.failed?"Needs attention":"All clear"}/>
+              <DashboardCard label="Scheduled posts"     value={stats.scheduled}     icon={CalendarClock} accent="primary"  hint="Awaiting publish"/>
+              <DashboardCard label="Publishing today"    value={stats.todayCount}    icon={Clock}         accent="chart-2"  hint="Next 24h"/>
+              <DashboardCard label="Published this week" value={stats.weekPublished} icon={CheckCircle2}  accent="chart-3"/>
+              <DashboardCard label="Failed"              value={stats.failed}        icon={AlertTriangle} accent="chart-5"  hint={stats.failed?"Needs attention":"All clear"}/>
             </div>
 
             {/* Filters */}
@@ -922,7 +908,7 @@ function SchedulePage() {
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <Filter className="h-4 w-4 text-muted-foreground"/>
-                  <Select value={sf} onValueChange={v=>setSf(v as never)}>
+                  <Select value={statusFilter} onValueChange={v=>setStatusFilter(v as never)}>
                     <SelectTrigger className="h-9 w-[150px]"><SelectValue placeholder="Status"/></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="all">All statuses</SelectItem>
@@ -932,7 +918,7 @@ function SchedulePage() {
                       <SelectItem value="failed">Failed</SelectItem>
                     </SelectContent>
                   </Select>
-                  <Select value={rf} onValueChange={v=>setRf(v as never)}>
+                  <Select value={rangeFilter} onValueChange={v=>setRangeFilter(v as never)}>
                     <SelectTrigger className="h-9 w-[140px]"><SelectValue placeholder="Date range"/></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="all">Any time</SelectItem>
@@ -954,43 +940,44 @@ function SchedulePage() {
               </TabsList>
               <TabsContent value="calendar" className="mt-4">
                 <CalendarView weekStart={weekStart} setWeekStart={setWeekStart} items={filtered}
-                  onOpen={setSelected} onDragStart={setDragId} onDrop={onDrop} onSchedule={()=>setCreateOpen(true)}/>
+                  onOpen={setSelected} onDragStart={setDragId} onDropOnDay={onDropOnDay}
+                  onSchedule={()=>setCreateOpen(true)}/>
               </TabsContent>
               <TabsContent value="queue" className="mt-4">
                 <QueueView items={filtered.filter(i=>["scheduled","publishing","failed"].includes(i.status))}
-                  onOpen={setSelected} onCancel={remove} onPublish={publishNow} onRetry={retry} onSchedule={()=>setCreateOpen(true)}/>
+                  onOpen={setSelected} onCancel={removeItem} onPublishNow={publishNow} onRetry={retryPublish}
+                  onSchedule={()=>setCreateOpen(true)}/>
               </TabsContent>
               <TabsContent value="history" className="mt-4">
                 <HistoryView items={filtered.filter(i=>["published","failed"].includes(i.status))}
-                  onOpen={setSelected} onRetry={retry}/>
+                  onOpen={setSelected} onRetry={retryPublish}/>
               </TabsContent>
             </Tabs>
           </div>
         </main>
       </SidebarInset>
 
-      <DetailSheet item={selected} onClose={()=>setSelected(null)} token={token}
-        onRetry={retry} onPublish={publishNow} onRemove={remove}/>
-      <CreateScheduleDialog open={createOpen} onOpenChange={setCreateOpen} token={token}/>
-      <AccountDialog open={accountOpen} onOpenChange={setAccountOpen} token={token}
-        onDisconnect={()=>{clearToken();setToken(null);toast.success("Disconnected");}}/>
-      <QuickPostDialog open={quickOpen} onOpenChange={setQuickOpen} token={token}/>
+      <DetailSheet item={selected} onClose={()=>setSelected(null)}
+        fanvueToken={fanvueToken} onRetry={retryPublish} onPublishNow={publishNow} onRemove={removeItem}/>
+      <CreateScheduleDialog open={createOpen} onOpenChange={setCreateOpen} fanvueToken={fanvueToken}/>
+      <AccountDialog open={accountOpen} onOpenChange={setAccountOpen} token={fanvueToken}
+        onDisconnect={()=>{ clearToken(); setFanvueToken(null); toast.success("Fanvue account disconnected"); }}/>
       <DebugPanel logs={logs} onClear={clearLogs}/>
     </SidebarProvider>
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Calendar
+// Calendar view
 // ─────────────────────────────────────────────────────────────────────────────
-function CalendarView({weekStart,setWeekStart,items,onOpen,onDragStart,onDrop,onSchedule}:{
+function CalendarView({weekStart,setWeekStart,items,onOpen,onDragStart,onDropOnDay,onSchedule}: {
   weekStart:Date;setWeekStart:(d:Date)=>void;items:ScheduledItem[];
-  onOpen:(i:ScheduledItem)=>void;onDragStart:(id:string|null)=>void;
-  onDrop:(d:Date)=>void;onSchedule:()=>void;
+  onOpen:(i:ScheduledItem)=>void;onDragStart:(id:string|null)=>void;onDropOnDay:(d:Date)=>void;onSchedule:()=>void;
 }) {
-  const days=Array.from({length:7}).map((_,i)=>{const d=new Date(weekStart);d.setDate(d.getDate()+i);return d;});
-  const mv=(n:number)=>{const d=new Date(weekStart);d.setDate(d.getDate()+n*7);setWeekStart(d);};
-  const today=new Date();
+  const days  = Array.from({length:7}).map((_,i)=>{const d=new Date(weekStart);d.setDate(d.getDate()+i);return d;});
+  const move  = (n:number)=>{const d=new Date(weekStart);d.setDate(d.getDate()+n*7);setWeekStart(d);};
+  const today = new Date();
+  const byDay = (day:Date) => items.filter(i=>sameDay(new Date(i.scheduledAt),day)).sort((a,b)=>+new Date(a.scheduledAt)-+new Date(b.scheduledAt));
   return (
     <Card className="border-border/60 bg-card">
       <CardContent className="p-4">
@@ -1000,18 +987,17 @@ function CalendarView({weekStart,setWeekStart,items,onOpen,onDragStart,onDrop,on
             <p className="text-xs text-muted-foreground">Drag cards to reschedule</p>
           </div>
           <div className="flex items-center gap-1">
-            <Button variant="outline" size="icon" className="h-8 w-8" onClick={()=>mv(-1)}><ChevronLeft className="h-4 w-4"/></Button>
-            <Button variant="outline" size="sm"   className="h-8" onClick={()=>{const d=new Date();d.setHours(0,0,0,0);d.setDate(d.getDate()-d.getDay());setWeekStart(d);}}>Today</Button>
-            <Button variant="outline" size="icon" className="h-8 w-8" onClick={()=>mv(1)}><ChevronRight className="h-4 w-4"/></Button>
+            <Button variant="outline" size="icon" className="h-8 w-8" onClick={()=>move(-1)}><ChevronLeft className="h-4 w-4"/></Button>
+            <Button variant="outline" size="sm" className="h-8" onClick={()=>{const d=new Date();d.setHours(0,0,0,0);d.setDate(d.getDate()-d.getDay());setWeekStart(d);}}>Today</Button>
+            <Button variant="outline" size="icon" className="h-8 w-8" onClick={()=>move(1)}><ChevronRight className="h-4 w-4"/></Button>
           </div>
         </div>
-        {items.length===0?<EmptyState onSchedule={onSchedule}/>:(
+        {items.length===0 ? <EmptyState onSchedule={onSchedule}/> : (
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-7">
             {days.map(day=>{
-              const di=items.filter(i=>sameDay(new Date(i.scheduledAt),day)).sort((a,b)=>+new Date(a.scheduledAt)-+new Date(b.scheduledAt));
-              const isToday=sameDay(day,today);
+              const di=byDay(day); const isToday=sameDay(day,today);
               return (
-                <div key={day.toISOString()} onDragOver={e=>e.preventDefault()} onDrop={()=>onDrop(day)}
+                <div key={day.toISOString()} onDragOver={e=>e.preventDefault()} onDrop={()=>onDropOnDay(day)}
                   className="flex min-h-[260px] flex-col rounded-lg border border-border/60 bg-background/40 p-2 hover:border-primary/40 transition-colors">
                   <div className="mb-2 flex items-baseline justify-between px-1">
                     <p className={cn("text-[10px] font-medium uppercase tracking-wider",isToday?"text-primary":"text-muted-foreground")}>{day.toLocaleDateString([],{weekday:"short"})}</p>
@@ -1020,17 +1006,17 @@ function CalendarView({weekStart,setWeekStart,items,onOpen,onDragStart,onDrop,on
                   <div className="flex flex-col gap-1.5">
                     {di.map(i=>(
                       <button key={i.id} type="button" draggable onDragStart={()=>onDragStart(i.id)} onClick={()=>onOpen(i)}
-                        className="group flex flex-col gap-1.5 rounded-md border border-border/60 bg-card p-1.5 text-left hover:border-primary/50 transition-colors">
+                        className="flex flex-col gap-1.5 rounded-md border border-border/60 bg-card p-1.5 text-left hover:border-primary/50 transition-colors">
                         <div className="relative h-16 w-full overflow-hidden rounded">
                           <img src={i.thumbnail} alt="" className="h-full w-full object-cover"/>
                           <div className="absolute left-1 top-1 grid h-5 w-5 place-items-center rounded bg-black/60">
                             {i.type==="video"?<VideoIcon className="h-3 w-3 text-white"/>:<ImageIcon className="h-3 w-3 text-white"/>}
                           </div>
-                          <div className="absolute right-1 top-1"><SBadge status={i.status}/></div>
+                          <div className="absolute right-1 top-1"><StatusBadge status={i.status}/></div>
                         </div>
                         <div className="px-0.5">
                           <p className="truncate text-xs font-medium">{i.character}</p>
-                          <p className="text-[10px] text-muted-foreground">{ft(i.scheduledAt)}</p>
+                          <p className="text-[10px] text-muted-foreground">{fmtT(i.scheduledAt)}</p>
                         </div>
                       </button>
                     ))}
@@ -1049,11 +1035,11 @@ function CalendarView({weekStart,setWeekStart,items,onOpen,onDragStart,onDrop,on
 // ─────────────────────────────────────────────────────────────────────────────
 // Queue view
 // ─────────────────────────────────────────────────────────────────────────────
-function QueueView({items,onOpen,onCancel,onPublish,onRetry,onSchedule}:{
+function QueueView({items,onOpen,onCancel,onPublishNow,onRetry,onSchedule}: {
   items:ScheduledItem[];onOpen:(i:ScheduledItem)=>void;onCancel:(id:string)=>void;
-  onPublish:(id:string)=>void;onRetry:(id:string)=>void;onSchedule:()=>void;
+  onPublishNow:(id:string)=>void;onRetry:(id:string)=>void;onSchedule:()=>void;
 }) {
-  if(items.length===0) return <Card className="border-border/60 bg-card"><CardContent className="p-4"><EmptyState onSchedule={onSchedule} msg="Queue is empty."/></CardContent></Card>;
+  if (items.length===0) return <Card className="border-border/60 bg-card"><CardContent className="p-4"><EmptyState onSchedule={onSchedule} message="Publishing queue is empty."/></CardContent></Card>;
   return (
     <div className="grid gap-3">
       {items.map(i=>(
@@ -1066,20 +1052,22 @@ function QueueView({items,onOpen,onCancel,onPublish,onRetry,onSchedule}:{
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2">
                 <p className="truncate text-sm font-semibold">{i.contentName}</p>
-                <QBadge status={i.queueStatus}/>
+                <QueueBadge status={i.queueStatus}/>
               </div>
               <p className="mt-0.5 text-xs text-muted-foreground">{i.character}</p>
-              <p className="mt-1 inline-flex items-center gap-1 text-xs text-muted-foreground"><Clock className="h-3 w-3"/>{fdt(i.scheduledAt)}</p>
-              {!i.mediaUrl&&<p className="mt-1 text-[10px] text-destructive">⚠ No media URL — check Supabase images/videos table</p>}
+              <p className="mt-1 inline-flex items-center gap-1 text-xs text-muted-foreground"><Clock className="h-3 w-3"/>{fmtDT(i.scheduledAt)}</p>
+              {!i.mediaUrl && <p className="mt-1 text-[10px] text-destructive font-medium">⚠ No media URL — check Supabase images/videos table</p>}
             </div>
             <div className="flex items-center gap-1.5">
-              {i.status==="failed"
-                ?<Button size="sm" variant="outline" className="gap-1.5" onClick={()=>onRetry(i.id)}><RefreshCw className="h-3.5 w-3.5"/> Retry</Button>
-                :<Button size="sm" variant="outline" className="gap-1.5" onClick={()=>onPublish(i.id)}
-                    disabled={i.status==="publishing"||!i.mediaUrl}>
-                    {i.status==="publishing"?<Loader2 className="h-3.5 w-3.5 animate-spin"/>:<Send className="h-3.5 w-3.5"/>}
-                    {i.status==="publishing"?"Publishing…":"Publish now"}
-                  </Button>}
+              {i.status==="failed" ? (
+                <Button size="sm" variant="outline" className="gap-1.5" onClick={()=>onRetry(i.id)}><RefreshCw className="h-3.5 w-3.5"/> Retry</Button>
+              ) : (
+                <Button size="sm" variant="outline" className="gap-1.5" onClick={()=>onPublishNow(i.id)}
+                  disabled={i.status==="publishing"||!i.mediaUrl}>
+                  {i.status==="publishing"?<Loader2 className="h-3.5 w-3.5 animate-spin"/>:<Send className="h-3.5 w-3.5"/>}
+                  {i.status==="publishing"?"Publishing…":"Publish now"}
+                </Button>
+              )}
               <DropdownMenu>
                 <DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="h-8 w-8"><MoreHorizontal className="h-4 w-4"/></Button></DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
@@ -1099,68 +1087,69 @@ function QueueView({items,onOpen,onCancel,onPublish,onRetry,onSchedule}:{
 // ─────────────────────────────────────────────────────────────────────────────
 // History view
 // ─────────────────────────────────────────────────────────────────────────────
-function HistoryView({items,onOpen,onRetry}:{items:ScheduledItem[];onOpen:(i:ScheduledItem)=>void;onRetry:(id:string)=>void;}) {
-  if(items.length===0) return (
+function HistoryView({items,onOpen,onRetry}: {items:ScheduledItem[];onOpen:(i:ScheduledItem)=>void;onRetry:(id:string)=>void;}) {
+  if (items.length===0) return (
     <Card className="border-border/60 bg-card"><CardContent className="p-10 text-center">
       <Inbox className="mx-auto h-10 w-10 text-muted-foreground/60"/>
-      <p className="mt-3 font-medium">No history yet</p>
+      <p className="mt-3 font-medium">No publishing history yet</p>
       <p className="mt-1 text-sm text-muted-foreground">Published and failed posts appear here.</p>
     </CardContent></Card>
   );
   return (
-    <Card className="border-border/60 bg-card">
-      <CardContent className="p-0">
-        <div className="grid grid-cols-12 gap-3 border-b border-border/60 px-4 py-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-          <div className="col-span-6">Content</div><div className="col-span-3">Published</div>
-          <div className="col-span-2">Post UUID</div><div className="col-span-1 text-right">Status</div>
-        </div>
-        {items.map(i=>(
-          <button key={i.id} type="button" onClick={()=>onOpen(i)}
-            className="grid w-full grid-cols-12 items-center gap-3 border-b border-border/40 px-4 py-3 text-left hover:bg-muted/40 last:border-b-0 transition-colors">
-            <div className="col-span-6 flex items-center gap-3">
-              <div className="relative h-12 w-16 shrink-0 overflow-hidden rounded">
-                <img src={i.thumbnail} alt="" className="h-full w-full object-cover"/>
-                {i.type==="video"&&<div className="absolute inset-0 grid place-items-center bg-black/30"><Play className="h-3.5 w-3.5 text-white"/></div>}
-              </div>
-              <div className="min-w-0"><p className="truncate text-sm font-medium">{i.contentName}</p><p className="truncate text-xs text-muted-foreground">{i.character}</p></div>
+    <Card className="border-border/60 bg-card"><CardContent className="p-0">
+      <div className="grid grid-cols-12 gap-3 border-b border-border/60 px-4 py-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+        <div className="col-span-6">Content</div><div className="col-span-3">Published</div>
+        <div className="col-span-2">Post ID</div><div className="col-span-1 text-right">Status</div>
+      </div>
+      {items.map(i=>(
+        <button key={i.id} type="button" onClick={()=>onOpen(i)}
+          className="grid w-full grid-cols-12 items-center gap-3 border-b border-border/40 px-4 py-3 text-left hover:bg-muted/40 last:border-b-0 transition-colors">
+          <div className="col-span-6 flex items-center gap-3">
+            <div className="relative h-12 w-16 shrink-0 overflow-hidden rounded">
+              <img src={i.thumbnail} alt="" className="h-full w-full object-cover"/>
+              {i.type==="video"&&<div className="absolute inset-0 grid place-items-center bg-black/30"><Play className="h-3.5 w-3.5 text-white"/></div>}
             </div>
-            <div className="col-span-3 text-xs text-muted-foreground">{i.publishedAt?fdt(i.publishedAt):"—"}</div>
-            <div className="col-span-2">
-              {i.externalPostId
-                ?<a href={`https://www.fanvue.com/post/${i.externalPostId}`} target="_blank" rel="noopener noreferrer"
-                    className="truncate font-mono text-[11px] text-primary hover:underline flex items-center gap-1" onClick={e=>e.stopPropagation()}>
-                    {i.externalPostId.slice(0,10)}…<ExternalLink className="h-3 w-3 flex-shrink-0"/>
-                  </a>
-                :<span className="font-mono text-[11px] text-muted-foreground">—</span>}
-            </div>
-            <div className="col-span-1 flex items-center justify-end gap-2">
-              <SBadge status={i.status}/>
-              {i.status==="failed"&&<Button size="icon" variant="ghost" className="h-7 w-7" onClick={e=>{e.stopPropagation();onRetry(i.id);}}><RefreshCw className="h-3.5 w-3.5"/></Button>}
-            </div>
-          </button>
-        ))}
-      </CardContent>
-    </Card>
+            <div className="min-w-0"><p className="truncate text-sm font-medium">{i.contentName}</p><p className="truncate text-xs text-muted-foreground">{i.character}</p></div>
+          </div>
+          <div className="col-span-3 text-xs text-muted-foreground">{i.publishedAt?fmtDT(i.publishedAt):fmtDT(i.scheduledAt)}</div>
+          <div className="col-span-2">
+            {i.externalPostId
+              ? <a href={`https://www.fanvue.com/post/${i.externalPostId}`} target="_blank" rel="noopener noreferrer"
+                  className="truncate font-mono text-[11px] text-primary hover:underline flex items-center gap-1" onClick={e=>e.stopPropagation()}>
+                  {i.externalPostId.slice(0,10)}… <ExternalLink className="h-3 w-3 flex-shrink-0"/>
+                </a>
+              : <span className="font-mono text-[11px] text-muted-foreground">—</span>}
+          </div>
+          <div className="col-span-1 flex items-center justify-end gap-2">
+            <StatusBadge status={i.status}/>
+            {i.status==="failed"&&<Button size="icon" variant="ghost" className="h-7 w-7" onClick={e=>{e.stopPropagation();onRetry(i.id);}}><RefreshCw className="h-3.5 w-3.5"/></Button>}
+          </div>
+        </button>
+      ))}
+    </CardContent></Card>
   );
 }
 
-function EmptyState({onSchedule,msg="No scheduled content."}:{onSchedule:()=>void;msg?:string}) {
+// ─────────────────────────────────────────────────────────────────────────────
+// Empty state
+// ─────────────────────────────────────────────────────────────────────────────
+function EmptyState({onSchedule,message="No scheduled content."}: {onSchedule:()=>void;message?:string;}) {
   return (
     <div className="mx-auto max-w-md py-10 text-center">
       <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl border border-border/60 bg-background"><CalendarClock className="h-6 w-6 text-muted-foreground"/></div>
-      <p className="mt-4 font-display text-lg font-semibold">{msg}</p>
-      <p className="mt-1 text-sm text-muted-foreground">Pick an approved asset and schedule it to your Fanvue account.</p>
+      <p className="mt-4 font-display text-lg font-semibold">{message}</p>
+      <p className="mt-1 text-sm text-muted-foreground">Pick an approved asset and schedule it to Fanvue.</p>
       <Button size="sm" className="mt-5 gap-2" onClick={onSchedule}><CalendarPlus className="h-4 w-4"/> Schedule content</Button>
     </div>
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Detail sheet
+// Detail sheet — with manual post link option
 // ─────────────────────────────────────────────────────────────────────────────
-function DetailSheet({item,onClose,token,onRetry,onPublish,onRemove}:{
-  item:ScheduledItem|null;onClose:()=>void;token:FvToken|null;
-  onRetry:(id:string)=>void;onPublish:(id:string)=>void;onRemove:(id:string)=>void;
+function DetailSheet({item,onClose,fanvueToken,onRetry,onPublishNow,onRemove}: {
+  item:ScheduledItem|null;onClose:()=>void;fanvueToken:StoredToken|null;
+  onRetry:(id:string)=>void;onPublishNow:(id:string)=>void;onRemove:(id:string)=>void;
 }) {
   return (
     <Sheet open={!!item} onOpenChange={o=>!o&&onClose()}>
@@ -1168,43 +1157,84 @@ function DetailSheet({item,onClose,token,onRetry,onPublish,onRemove}:{
         {item&&(
           <>
             <SheetHeader>
-              <SheetTitle className="flex items-center gap-2">{item.contentName} <SBadge status={item.status}/></SheetTitle>
-              <SheetDescription>{item.character} · {item.type} · {fdt(item.scheduledAt)}</SheetDescription>
+              <SheetTitle className="flex items-center gap-2">{item.contentName} <StatusBadge status={item.status}/></SheetTitle>
+              <SheetDescription>{item.character} · {item.type} · {fmtDT(item.scheduledAt)}</SheetDescription>
             </SheetHeader>
-            <div className="mt-6 space-y-6">
+            <div className="mt-6 space-y-5">
+              {/* Preview */}
               <div className="relative aspect-video overflow-hidden rounded-lg bg-muted">
                 {item.type==="video"
                   ?<video src={item.mediaUrl||item.thumbnail} controls playsInline className="h-full w-full object-cover"/>
                   :<img src={item.mediaUrl||item.thumbnail} alt="" className="h-full w-full object-cover"/>}
               </div>
+
+              {/* Account info */}
               <div className="grid grid-cols-2 gap-3">
-                <Field label="Scheduled"     value={fdt(item.scheduledAt)}/>
-                <Field label="Fanvue account" value={token?`${token.name} (@${token.handle})`:"Not connected"}/>
-                <Field label="Media"          value={item.mediaUrl?"✓ URL available":"✗ Missing — check Supabase"}/>
-                <Field label="Review status"  value="Approved"/>
+                <div className="rounded-md border border-border bg-background/40 p-3">
+                  <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Scheduled</p>
+                  <p className="mt-1 text-sm">{fmtDT(item.scheduledAt)}</p>
+                </div>
+                <div className="rounded-md border border-border bg-background/40 p-3">
+                  <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Fanvue Account</p>
+                  <p className="mt-1 text-sm">{fanvueToken ? `${fanvueToken.name} (@${fanvueToken.handle})` : <span className="text-muted-foreground">Not connected</span>}</p>
+                </div>
               </div>
-              {!item.mediaUrl&&(
+
+              {/* No media URL warning */}
+              {!item.mediaUrl && (
                 <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
-                  <AlertTriangle className="h-4 w-4 text-destructive mt-px shrink-0"/>
-                  <p className="text-xs text-destructive">No media URL. Check the {item.type==="image"?"images":"videos"} table in Supabase for this record — the {item.type==="image"?"image_url":"video_url"} column may be empty.</p>
+                  <AlertTriangle className="h-4 w-4 text-destructive mt-px flex-shrink-0"/>
+                  <div className="text-xs text-destructive">
+                    <p className="font-medium">No media URL found</p>
+                    <p className="mt-0.5 text-destructive/80">Check the <code>{item.type==="image"?"images":"videos"}</code> table in Supabase — the <code>{item.type==="image"?"image_url":"video_url"}</code> column may be empty.</p>
+                  </div>
                 </div>
               )}
-              {item.externalPostId&&(
-                <div className="rounded-md border border-border bg-background/40 p-3">
-                  <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Fanvue Post UUID</p>
+
+              {/* If published — show post link */}
+              {item.externalPostId && (
+                <div className="rounded-md border border-success/30 bg-success/5 p-3">
+                  <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Published Post UUID</p>
                   <p className="mt-1 font-mono text-xs break-all">{item.externalPostId}</p>
                   <a href={`https://www.fanvue.com/post/${item.externalPostId}`} target="_blank" rel="noopener noreferrer"
                     className="mt-2 inline-flex items-center gap-1.5 text-xs text-primary hover:underline">
-                    <ExternalLink className="h-3 w-3"/> View on Fanvue
+                    <ExternalLink className="h-3 w-3"/> View post on Fanvue
                   </a>
                 </div>
               )}
+
+              {/* Option 2 — post manually on Fanvue using the stored URL */}
+              {item.mediaUrl && item.status !== "published" && (
+                <div className="rounded-md border border-border bg-muted/20 p-3 space-y-2">
+                  <p className="text-xs font-medium text-foreground">Option B — Post manually on Fanvue</p>
+                  <p className="text-xs text-muted-foreground">
+                    Can't publish via API? Use the direct media URL to post manually from your Fanvue dashboard.
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <code className="flex-1 rounded bg-background border border-border px-2 py-1 text-[11px] font-mono break-all text-foreground">{item.mediaUrl}</code>
+                    <Button size="sm" variant="outline" onClick={() => { navigator.clipboard.writeText(item.mediaUrl); toast.success("URL copied!"); }}>
+                      Copy
+                    </Button>
+                  </div>
+                  <Button size="sm" variant="outline" className="w-full gap-1.5" asChild>
+                    <a href="https://fanvue.com/posts/create" target="_blank" rel="noopener noreferrer">
+                      <ExternalLink className="h-3.5 w-3.5"/> Open Fanvue post creator
+                    </a>
+                  </Button>
+                </div>
+              )}
+
+              {/* Scene prompts */}
               <div>
                 <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Scene prompts</p>
-                <ScrollArea className="h-40 rounded-md border border-border bg-background/40 p-3">
-                  <ol className="space-y-2 text-xs">{item.scenePrompts.map((p,i)=><li key={i} className="leading-relaxed"><span className="mr-1 text-muted-foreground">{i+1}.</span>{p}</li>)}</ol>
+                <ScrollArea className="h-32 rounded-md border border-border bg-background/40 p-3">
+                  <ol className="space-y-2 text-xs">
+                    {item.scenePrompts.map((p,i)=><li key={i} className="leading-relaxed"><span className="mr-1 text-muted-foreground">{i+1}.</span>{p}</li>)}
+                  </ol>
                 </ScrollArea>
               </div>
+
+              {/* History */}
               <div>
                 <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">History</p>
                 <ol className="relative space-y-3 border-l border-border pl-4">
@@ -1212,20 +1242,21 @@ function DetailSheet({item,onClose,token,onRetry,onPublish,onRemove}:{
                     <li key={i} className="relative">
                       <span className="absolute -left-[21px] top-1 h-2.5 w-2.5 rounded-full bg-primary ring-4 ring-background"/>
                       <p className="text-xs font-medium">{h.label}</p>
-                      <p className="text-[11px] text-muted-foreground">{fdt(h.at)}</p>
+                      <p className="text-[11px] text-muted-foreground">{fmtDT(h.at)}</p>
                     </li>
                   ))}
                 </ol>
               </div>
+
               <Separator/>
               <div className="flex flex-wrap items-center gap-2">
                 {item.status==="failed"
                   ?<Button size="sm" className="gap-2" onClick={()=>onRetry(item.id)}><RefreshCw className="h-4 w-4"/> Retry</Button>
                   :item.status!=="published"
-                    ?<Button size="sm" className="gap-2" onClick={()=>onPublish(item.id)}
-                        disabled={item.status==="publishing"||!item.mediaUrl||!token}>
+                    ?<Button size="sm" className="gap-2" onClick={()=>onPublishNow(item.id)}
+                        disabled={item.status==="publishing"||!item.mediaUrl||!fanvueToken}>
                         {item.status==="publishing"?<Loader2 className="h-4 w-4 animate-spin"/>:<Send className="h-4 w-4"/>}
-                        {item.status==="publishing"?"Publishing…":"Publish to Fanvue"}
+                        {item.status==="publishing"?"Publishing…":"Publish now to Fanvue"}
                       </Button>
                     :null}
                 <Button size="sm" variant="outline" className="gap-2 text-destructive hover:text-destructive" onClick={()=>onRemove(item.id)}>
@@ -1240,36 +1271,30 @@ function DetailSheet({item,onClose,token,onRetry,onPublish,onRemove}:{
   );
 }
 
-function Field({label,value}:{label:string;value:string}) {
-  return (
-    <div className="rounded-md border border-border bg-background/40 p-3">
-      <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">{label}</p>
-      <p className="mt-1 text-sm">{value}</p>
-    </div>
-  );
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Create schedule dialog
 // ─────────────────────────────────────────────────────────────────────────────
-function CreateScheduleDialog({open,onOpenChange,token}:{open:boolean;onOpenChange:(o:boolean)=>void;token:FvToken|null}) {
-  const queryClient=useQueryClient();
-  const {data:assets=[]}=useQuery({queryKey:["assets"],queryFn:fetchApprovedAssets,enabled:open});
-  const [idx,setIdx]     = useState("0");
-  const [date,setDate]   = useState(()=>{const d=new Date();d.setDate(d.getDate()+1);return d.toISOString().slice(0,10);});
-  const [time,setTime]   = useState("18:00");
+function CreateScheduleDialog({open,onOpenChange,fanvueToken}: {open:boolean;onOpenChange:(o:boolean)=>void;fanvueToken:StoredToken|null;}) {
+  const queryClient = useQueryClient();
+  const {data:assets=[]} = useQuery({queryKey:["approved-assets"],queryFn:fetchApprovedAssets,enabled:open});
+  const [contentIdx, setContentIdx] = useState("0");
+  const [date, setDate] = useState(()=>{const d=new Date();d.setDate(d.getDate()+1);return d.toISOString().slice(0,10);});
+  const [time, setTime] = useState("18:00");
 
-  const submit = async()=>{
-    const asset=assets[Number(idx)];
-    if(!asset){toast.error("Pick an approved asset first");return;}
-    const iso=new Date(`${date}T${time}:00`).toISOString();
-    try{
-      const{data:u}=await supabase.auth.getUser();
-      await scheduleService.create({content_type:asset.type,content_id:asset.id,publish_time:iso,platform:"Fanvue",status:"scheduled",created_by:u.user?.id??null} as any);
-      toast.success("Scheduled!");
+  const submit = async () => {
+    const asset = assets[Number(contentIdx)];
+    if (!asset) { toast.error("Pick an approved asset first"); return; }
+    const iso = new Date(`${date}T${time}:00`).toISOString();
+    try {
+      const{data:userRes}=await supabase.auth.getUser();
+      await scheduleService.create({
+        content_type: asset.type, content_id: asset.id, publish_time: iso,
+        platform: "Fanvue", status: "scheduled", created_by: userRes.user?.id??null,
+      } as any);
+      toast.success("Content scheduled ✅");
       queryClient.invalidateQueries({queryKey:["schedules"]});
       onOpenChange(false);
-    }catch(e:any){toast.error(e?.message??"Failed");}
+    } catch(e:any){toast.error(e?.message??"Failed to schedule");}
   };
 
   return (
@@ -1283,23 +1308,25 @@ function CreateScheduleDialog({open,onOpenChange,token}:{open:boolean;onOpenChan
           <div className="space-y-1.5">
             <Label>Content</Label>
             {assets.length===0
-              ?<p className="rounded-md border border-dashed border-border bg-muted/30 p-3 text-xs text-muted-foreground">No approved content. Approve items in Review Queue first.</p>
-              :<Select value={idx} onValueChange={setIdx}>
-                  <SelectTrigger><SelectValue/></SelectTrigger>
-                  <SelectContent>{assets.map((a,i)=><SelectItem key={a.id} value={String(i)}>{a.name}</SelectItem>)}</SelectContent>
-                </Select>}
+              ?<p className="rounded-md border border-dashed border-border bg-muted/30 p-3 text-xs text-muted-foreground">No approved content yet. Approve items in the Review Queue first.</p>
+              :<Select value={contentIdx} onValueChange={setContentIdx}>
+                <SelectTrigger><SelectValue/></SelectTrigger>
+                <SelectContent>{assets.map((a,i)=><SelectItem key={a.id} value={String(i)}>{a.name}</SelectItem>)}</SelectContent>
+              </Select>}
           </div>
           <div className="space-y-1.5">
-            <Label>Fanvue account</Label>
-            {token
-              ?<div className="flex items-center gap-2 rounded-md border border-border bg-card/50 px-3 py-2">
-                  <span className="h-2 w-2 rounded-full bg-success shrink-0"/>
-                  <span className="text-sm font-medium">{token.name}</span>
-                  <span className="text-xs text-muted-foreground">@{token.handle}</span>
+            <Label>Publishing account</Label>
+            {fanvueToken
+              ?<div className="flex items-center gap-2 rounded-md border border-success/30 bg-success/5 px-3 py-2">
+                  <span className="h-2 w-2 rounded-full bg-success flex-shrink-0"/>
+                  <span className="text-sm font-medium">{fanvueToken.name}</span>
+                  <span className="text-xs text-muted-foreground">@{fanvueToken.handle}</span>
                 </div>
               :<div className="rounded-md border border-dashed border-border bg-muted/30 p-3">
-                  <p className="text-xs text-muted-foreground mb-2">No Fanvue account connected.</p>
-                  <Button size="sm" className="gap-2 w-full" onClick={()=>{onOpenChange(false);startOAuth();}}><ExternalLink className="h-3.5 w-3.5"/> Connect Fanvue</Button>
+                  <p className="text-xs text-muted-foreground mb-2">No Fanvue account connected yet.</p>
+                  <Button size="sm" className="gap-2 w-full" onClick={()=>{onOpenChange(false);startFanvueOAuth();}}>
+                    <ExternalLink className="h-3.5 w-3.5"/> Connect Fanvue Account
+                  </Button>
                 </div>}
           </div>
           <div className="grid grid-cols-2 gap-3">
@@ -1309,7 +1336,7 @@ function CreateScheduleDialog({open,onOpenChange,token}:{open:boolean;onOpenChan
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={()=>onOpenChange(false)}>Cancel</Button>
-          <Button onClick={submit} className="gap-2" disabled={!assets.length||!token}>
+          <Button onClick={submit} className="gap-2" disabled={!assets.length}>
             <CalendarPlus className="h-4 w-4"/> Schedule
           </Button>
         </DialogFooter>
