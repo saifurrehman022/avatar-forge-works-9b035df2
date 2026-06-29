@@ -1,3 +1,4 @@
+
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -34,7 +35,8 @@ import { cn } from "@/lib/utils";
 // Fanvue config
 // ─────────────────────────────────────────────────────────────────────────────
 const FANVUE_CLIENT_ID     = "f9d35fff-3d12-4dd5-8945-750c37d65ae9";
-const FANVUE_REDIRECT_URI  = "https://www.madamlila.com/schedule";
+const FANVUE_CLIENT_SECRET = "05275891c81581c5cb79d336c8e9f87680f0976843bf17d6737bdcf0dde38b1a";
+const FANVUE_REDIRECT_URI  = "https://avatar-forge-works-9b035df2-olive.vercel.app/schedule";
 const FANVUE_AUTH_URL      = "https://auth.fanvue.com/oauth2/auth";
 const FANVUE_API_BASE      = "https://api.fanvue.com";
 const FANVUE_API_VERSION   = "2025-06-26";
@@ -89,45 +91,11 @@ async function generatePKCE() {
 }
 const PKCE_KEY = "fv_pkce"; const STATE_KEY = "fv_state";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PKCE verifier/state storage — COOKIE, not sessionStorage.
-//
-// WHY: sessionStorage is locked to the exact origin (protocol + host + port).
-// If you click "Connect" on madamlila.com but Fanvue redirects back to
-// www.madamlila.com (or vice versa) — which is extremely common with custom
-// domains — sessionStorage written on one host is invisible on the other,
-// and you get "PKCE verifier missing". A cookie with Domain=madamlila.com
-// (no leading subdomain) is shared between the apex domain and any
-// subdomain, so it survives that redirect either way.
-//
-// For platform preview URLs (e.g. *.vercel.app, localhost) we skip the
-// Domain attribute and fall back to a normal host-only cookie, since you
-// can't set a cookie Domain on a public suffix like vercel.app.
-// ─────────────────────────────────────────────────────────────────────────────
-function cookieDomainAttr(): string {
-  const host = window.location.hostname;
-  if (host === "localhost" || /^[\d.]+$/.test(host)) return "";
-  const labels = host.split(".");
-  if (labels.length > 3) return ""; // platform subdomain, e.g. *.vercel.app — keep host-only
-  const bare = host.replace(/^www\./, "");
-  return `; Domain=${bare}`;
-}
-function setPkceCookie(name: string, value: string, maxAgeSeconds = 600) {
-  document.cookie = `${name}=${encodeURIComponent(value)}; Max-Age=${maxAgeSeconds}; Path=/; Secure; SameSite=Lax${cookieDomainAttr()}`;
-}
-function getPkceCookie(name: string): string | null {
-  const m = document.cookie.match(new RegExp(`(?:^|; )${name}=([^;]*)`));
-  return m ? decodeURIComponent(m[1]) : null;
-}
-function clearPkceCookie(name: string) {
-  document.cookie = `${name}=; Max-Age=0; Path=/; Secure; SameSite=Lax${cookieDomainAttr()}`;
-}
-
 async function startFanvueOAuth() {
   const { verifier, challenge } = await generatePKCE();
   const state = crypto.randomUUID();
-  setPkceCookie(PKCE_KEY, verifier);
-  setPkceCookie(STATE_KEY, state);
+  sessionStorage.setItem(PKCE_KEY, verifier);
+  sessionStorage.setItem(STATE_KEY, state);
   const p = new URLSearchParams({
     client_id: FANVUE_CLIENT_ID, redirect_uri: FANVUE_REDIRECT_URI,
     response_type: "code",
@@ -146,22 +114,23 @@ async function startFanvueOAuth() {
 // Contents are shown at the bottom of this file as a comment.
 // ─────────────────────────────────────────────────────────────────────────────
 async function exchangeFanvueCode(code: string): Promise<StoredToken> {
-  const verifier = getPkceCookie(PKCE_KEY);
+  const verifier = sessionStorage.getItem(PKCE_KEY);
   if (!verifier) throw new Error("PKCE verifier missing — please click Connect again");
-  clearPkceCookie(PKCE_KEY);
-  clearPkceCookie(STATE_KEY);
+  sessionStorage.removeItem(PKCE_KEY);
+  sessionStorage.removeItem(STATE_KEY);
 
   log("Exchanging code via /api/fanvue-token…");
 
   // Route through our Vercel API function — this avoids browser CORS on auth.fanvue.com
-  // NOTE: client_id/client_secret are NOT sent from the browser anymore — they're
-  // hardcoded inside /api/fanvue-token.ts (server-side only).
   const res = await fetch("/api/fanvue-token", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       code,
       code_verifier: verifier,
+      redirect_uri:  FANVUE_REDIRECT_URI,
+      client_id:     FANVUE_CLIENT_ID,
+      client_secret: FANVUE_CLIENT_SECRET,
     }),
   });
 
@@ -251,9 +220,7 @@ async function publishToFanvue(params: {
 
   // Verify token via GET /users/me  (confirmed correct endpoint from docs)
   rep("Verifying token with Fanvue…");
-  const meR = await fetch(`/api/fanvue-api?path=/users/me`, {
-    headers: fvH(token.accessToken)
-      });
+  const meR = await fetch(`/api/fanvue-api?path=/users/me`, { headers: fvH(token.accessToken) });
   const meText = await meR.text();
   log(`GET /users/me → ${meR.status}`, meText.slice(0, 300));
   if (!meR.ok) throw new Error(`Token rejected (${meR.status}). Reconnect your Fanvue account. Details: ${meText}`);
@@ -287,9 +254,7 @@ async function publishToFanvue(params: {
   // NOTE: This is the NON-AGENCY endpoint. It returns text/plain presigned URL.
   // The agency version (/creators/{uuid}/...) requires write:creator scope.
   rep("Step 2/5 — Getting S3 upload URL…");
-  const s2Url = `${FANVUE_API_BASE}/media/uploads/${uploadId}/parts/1/url`;
-  log(`GET ${s2Url}`);
-  const s2R = await fetch(s2Url, { headers: fvH(token.accessToken) });
+  const s2R = await fetch(`/api/fanvue-api?path=/media/uploads/${uploadId}/parts/1/url`, { headers: fvH(token.accessToken) });
   const s2T = (await s2R.text()).trim();
   log(`GET presigned URL → ${s2R.status}`, s2T.slice(0,200));
   if (!s2R.ok) throw new Error(`Step 2 failed (${s2R.status}): ${s2T}`);
@@ -313,7 +278,7 @@ async function publishToFanvue(params: {
 
   // Step 4 — PATCH /media/uploads/{uploadId}
   rep("Step 4/5 — Completing upload session…");
-  const s4R = await fetch(`${FANVUE_API_BASE}/media/uploads/${uploadId}`, {
+  const s4R = await fetch(`/api/fanvue-api?path=/media/uploads/${uploadId}`, {
     method: "PATCH",
     headers: fvH(token.accessToken, { "Content-Type": "application/json" }),
     body: JSON.stringify({ parts: [{ PartNumber: 1, ETag: etag }] }),
@@ -333,7 +298,7 @@ async function publishToFanvue(params: {
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 4000));
     attempt++;
-    const pR = await fetch(`${FANVUE_API_BASE}/media/${mediaUuid}`, { headers: fvH(token.accessToken) });
+    const pR = await fetch(`/api/fanvue-api?path=/media/${mediaUuid}`, { headers: fvH(token.accessToken) });
     log(`Poll #${attempt} → ${pR.status}`);
     if (pR.status === 404) { logW("404 on poll — waiting…"); continue; }
     if (!pR.ok) { logW(`Poll error ${pR.status} — retrying`); continue; }
@@ -349,7 +314,7 @@ async function publishToFanvue(params: {
   rep("Creating post on Fanvue…");
   const postBody = { text: caption, mediaUuids: [mediaUuid], audience: "followers-and-subscribers" };
   log("POST /posts", JSON.stringify(postBody));
-  const postR = await fetch(`${FANVUE_API_BASE}/posts`, {
+  const postR = await fetch(`/api/fanvue-api?path=/posts`, {
     method: "POST",
     headers: fvH(token.accessToken, { "Content-Type": "application/json" }),
     body: JSON.stringify(postBody),
@@ -1194,3 +1159,56 @@ function CreateScheduleDialog({open,onOpenChange,fanvueToken}:{
     </Dialog>
   );
 }
+
+/*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REQUIRED: Create these two Vercel API routes in your project root.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FILE 1: /api/fanvue-token.ts
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+import type { VercelRequest, VercelResponse } from "@vercel/node";
+
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "POST") return res.status(405).end("Method Not Allowed");
+
+  const { code, code_verifier, redirect_uri, client_id, client_secret } = req.body;
+  if (!code || !code_verifier) return res.status(400).json({ error: "Missing params" });
+
+  // Exchange code for tokens (server-side — no CORS issue)
+  const tokenRes = await fetch("https://auth.fanvue.com/oauth2/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      code_verifier,
+      redirect_uri,
+      client_id,
+      client_secret,
+    }).toString(),
+  });
+
+  const tokenText = await tokenRes.text();
+  if (!tokenRes.ok) return res.status(tokenRes.status).send(tokenText);
+
+  const tokens = JSON.parse(tokenText);
+
+  // Fetch profile using correct endpoint from Fanvue docs: GET /users/me
+  let profile = null;
+  try {
+    const meRes = await fetch("https://api.fanvue.com/users/me", {
+      headers: {
+        Authorization: `Bearer ${tokens.access_token}`,
+        "X-Fanvue-API-Version": "2025-06-26",
+      },
+    });
+    if (meRes.ok) profile = await meRes.json();
+  } catch {}
+
+  return res.status(200).json({ ...tokens, profile });
+}
+
+
+*/
