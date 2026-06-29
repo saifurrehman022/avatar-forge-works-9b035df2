@@ -240,7 +240,11 @@ rep(`Authenticated as @${token.handle}`);
   const s1R = await fetch(`/api/fanvue-api?path=/media/uploads`, {
     method: "POST",
     headers: fvH(token.access_token, { "Content-Type": "application/json" }),
-    body: JSON.stringify({ name: filename, filename, mediaType }),
+    body: JSON.stringify({
+      filename,
+      contentType: mime,
+      size: blob.size,
+}),
   });
   const s1T = await s1R.text();
   log(`POST /media/uploads → ${s1R.status}`, s1T.slice(0,300));
