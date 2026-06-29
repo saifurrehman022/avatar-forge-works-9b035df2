@@ -1,4 +1,3 @@
-
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -35,7 +34,6 @@ import { cn } from "@/lib/utils";
 // Fanvue config
 // ─────────────────────────────────────────────────────────────────────────────
 const FANVUE_CLIENT_ID     = "f9d35fff-3d12-4dd5-8945-750c37d65ae9";
-const FANVUE_CLIENT_SECRET = "05275891c81581c5cb79d336c8e9f87680f0976843bf17d6737bdcf0dde38b1a";
 const FANVUE_REDIRECT_URI  = "https://avatar-forge-works-9b035df2-olive.vercel.app/schedule";
 const FANVUE_AUTH_URL      = "https://auth.fanvue.com/oauth2/auth";
 const FANVUE_API_BASE      = "https://api.fanvue.com";
@@ -122,15 +120,14 @@ async function exchangeFanvueCode(code: string): Promise<StoredToken> {
   log("Exchanging code via /api/fanvue-token…");
 
   // Route through our Vercel API function — this avoids browser CORS on auth.fanvue.com
+  // NOTE: client_id/client_secret are NOT sent from the browser anymore — they're
+  // hardcoded inside /api/fanvue-token.ts (server-side only).
   const res = await fetch("/api/fanvue-token", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       code,
       code_verifier: verifier,
-      redirect_uri:  FANVUE_REDIRECT_URI,
-      client_id:     FANVUE_CLIENT_ID,
-      client_secret: FANVUE_CLIENT_SECRET,
     }),
   });
 
@@ -1161,56 +1158,3 @@ function CreateScheduleDialog({open,onOpenChange,fanvueToken}:{
     </Dialog>
   );
 }
-
-/*
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-REQUIRED: Create these two Vercel API routes in your project root.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-FILE 1: /api/fanvue-token.ts
-━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-import type { VercelRequest, VercelResponse } from "@vercel/node";
-
-export default async function handler(req: VercelRequest, res: VercelResponse) {
-  if (req.method !== "POST") return res.status(405).end("Method Not Allowed");
-
-  const { code, code_verifier, redirect_uri, client_id, client_secret } = req.body;
-  if (!code || !code_verifier) return res.status(400).json({ error: "Missing params" });
-
-  // Exchange code for tokens (server-side — no CORS issue)
-  const tokenRes = await fetch("https://auth.fanvue.com/oauth2/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "authorization_code",
-      code,
-      code_verifier,
-      redirect_uri,
-      client_id,
-      client_secret,
-    }).toString(),
-  });
-
-  const tokenText = await tokenRes.text();
-  if (!tokenRes.ok) return res.status(tokenRes.status).send(tokenText);
-
-  const tokens = JSON.parse(tokenText);
-
-  // Fetch profile using correct endpoint from Fanvue docs: GET /users/me
-  let profile = null;
-  try {
-    const meRes = await fetch("https://api.fanvue.com/users/me", {
-      headers: {
-        Authorization: `Bearer ${tokens.access_token}`,
-        "X-Fanvue-API-Version": "2025-06-26",
-      },
-    });
-    if (meRes.ok) profile = await meRes.json();
-  } catch {}
-
-  return res.status(200).json({ ...tokens, profile });
-}
-
-
-*/
