@@ -237,7 +237,9 @@ rep(`Authenticated as @${token.handle}`);
 
   // Step 1 — POST /media/uploads
   rep("Step 1/5 — Creating upload session…");
-  const s1R = await fetch(`/api/fanvue-api?path=/media/uploads`, {
+  const s1R = await fetch(
+    `/api/fanvue-api?path=/creators/${token.uuid}/media/uploads`,
+  {
     method: "POST",
     headers: fvH(token.access_token, { "Content-Type": "application/json" }),
     body: JSON.stringify({
