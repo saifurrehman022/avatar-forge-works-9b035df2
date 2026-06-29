@@ -676,7 +676,30 @@ function SchedulePage() {
       .subscribe();
     return ()=>{supabase.removeChannel(ch);};
   },[queryClient]);
+  // Auto-publish: check every 30 seconds for due items
+  useEffect(() => {
+    const checkAndPublish = async () => {
+      const now = new Date();
+      const token = loadToken();
+      if (!token?.accessToken) return;
 
+      const dueItems = items.filter(i =>
+        i.status === "scheduled" &&
+        new Date(i.scheduledAt) <= now &&
+        i.mediaUrl
+      );
+
+      for (const item of dueItems) {
+        log(`Auto-publishing overdue item: ${item.contentName}`);
+        await publishNow(item.id);
+      }
+    };
+
+    checkAndPublish();
+    const interval = setInterval(checkAndPublish, 30_000);
+    return () => clearInterval(interval);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items]);
   const [tab,setTab]               = useState("calendar");
   const [search,setSearch]         = useState("");
   const [statusFilter,setStatusFilter] = useState<"all"|PublishStatus>("all");
