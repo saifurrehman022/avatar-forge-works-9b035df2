@@ -237,17 +237,19 @@ rep(`Authenticated as @${token.handle}`);
 
   // Step 1 — POST /media/uploads
   rep("Step 1/5 — Creating upload session…");
-  const s1R = await fetch(
-    `/api/fanvue-api?path=/creators/${token.uuid}/media/uploads`,
-  {
+  const fd = new FormData();
+  fd.append("filename", filename);
+  fd.append("content_type", mime);
+  fd.append("size", String(blob.size));
+
+  const s1R = await fetch(`/api/fanvue-api?path=/media/uploads`, {
     method: "POST",
-    headers: fvH(token.access_token, { "Content-Type": "application/json" }),
-    body: JSON.stringify({
-      filename,
-      contentType: mime,
-      size: blob.size,
-}),
-  });
+    headers: {
+      Authorization: `Bearer ${token.access_token}`,
+      "X-Fanvue-API-Version": "2025-06-26",
+  },
+    body: fd,
+});
   const s1T = await s1R.text();
   log(`POST /media/uploads → ${s1R.status}`, s1T.slice(0,300));
   if (!s1R.ok) throw new Error(`Step 1 failed (${s1R.status}): ${s1T}`);
