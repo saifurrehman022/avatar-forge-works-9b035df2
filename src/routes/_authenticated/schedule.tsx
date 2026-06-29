@@ -220,7 +220,7 @@ async function publishToFanvue(params: {
 
   // Verify token via GET /users/me  (confirmed correct endpoint from docs)
   rep("Verifying token with Fanvue…");
-  const meR = await fetch(`/api/fanvue-api?path=/users/me`, { headers: fvH(token.accessToken) });
+  const meR = await fetch(`/api/fanvue-api?path=/users/me`, { headers: fvH(token.access_token) });
   const meText = await meR.text();
   log(`GET /users/me → ${meR.status}`, meText.slice(0, 300));
   if (!meR.ok) throw new Error(`Token rejected (${meR.status}). Reconnect your Fanvue account. Details: ${meText}`);
@@ -239,7 +239,7 @@ async function publishToFanvue(params: {
   rep("Step 1/5 — Creating upload session…");
   const s1R = await fetch(`/api/fanvue-api?path=/media/uploads`, {
     method: "POST",
-    headers: fvH(token.accessToken, { "Content-Type": "application/json" }),
+    headers: fvH(token.access_token, { "Content-Type": "application/json" }),
     body: JSON.stringify({ name: filename, filename, mediaType }),
   });
   const s1T = await s1R.text();
@@ -254,7 +254,7 @@ async function publishToFanvue(params: {
   // NOTE: This is the NON-AGENCY endpoint. It returns text/plain presigned URL.
   // The agency version (/creators/{uuid}/...) requires write:creator scope.
   rep("Step 2/5 — Getting S3 upload URL…");
-  const s2R = await fetch(`/api/fanvue-api?path=/media/uploads/${uploadId}/parts/1/url`, { headers: fvH(token.accessToken) });
+  const s2R = await fetch(`/api/fanvue-api?path=/media/uploads/${uploadId}/parts/1/url`, { headers: fvH(token.access_token) });
   const s2T = (await s2R.text()).trim();
   log(`GET presigned URL → ${s2R.status}`, s2T.slice(0,200));
   if (!s2R.ok) throw new Error(`Step 2 failed (${s2R.status}): ${s2T}`);
@@ -280,7 +280,7 @@ async function publishToFanvue(params: {
   rep("Step 4/5 — Completing upload session…");
   const s4R = await fetch(`/api/fanvue-api?path=/media/uploads/${uploadId}`, {
     method: "PATCH",
-    headers: fvH(token.accessToken, { "Content-Type": "application/json" }),
+    headers: fvH(token.access_token, { "Content-Type": "application/json" }),
     body: JSON.stringify({ parts: [{ PartNumber: 1, ETag: etag }] }),
   });
   const s4T = await s4R.text();
@@ -298,7 +298,7 @@ async function publishToFanvue(params: {
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 4000));
     attempt++;
-    const pR = await fetch(`/api/fanvue-api?path=/media/${mediaUuid}`, { headers: fvH(token.accessToken) });
+    const pR = await fetch(`/api/fanvue-api?path=/media/${mediaUuid}`, { headers: fvH(token.access_token) });
     log(`Poll #${attempt} → ${pR.status}`);
     if (pR.status === 404) { logW("404 on poll — waiting…"); continue; }
     if (!pR.ok) { logW(`Poll error ${pR.status} — retrying`); continue; }
@@ -316,7 +316,7 @@ async function publishToFanvue(params: {
   log("POST /posts", JSON.stringify(postBody));
   const postR = await fetch(`/api/fanvue-api?path=/posts`, {
     method: "POST",
-    headers: fvH(token.accessToken, { "Content-Type": "application/json" }),
+    headers: fvH(token.access_token, { "Content-Type": "application/json" }),
     body: JSON.stringify(postBody),
   });
   const postT = await postR.text();
