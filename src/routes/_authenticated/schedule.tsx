@@ -243,7 +243,7 @@ rep(`Authenticated as @${token.handle}`);
   fd.append("content_type", mime);
   fd.append("size", String(blob.size));
 
-  const s1R = await fetch(`/api/fanvue-api?path=/media/uploads`, {
+  const s1R = await fetch(`/api/fanvue-api?path=/creators/${token.uuid}/media/uploads`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${token.access_token}`,
