@@ -34,7 +34,7 @@ import { cn } from "@/lib/utils";
 // Fanvue config
 // ─────────────────────────────────────────────────────────────────────────────
 const FANVUE_CLIENT_ID     = "f9d35fff-3d12-4dd5-8945-750c37d65ae9";
-const FANVUE_REDIRECT_URI  = "https://avatar-forge-works-9b035df2-olive.vercel.app/schedule";
+const FANVUE_REDIRECT_URI  = "https://www.madamlila.com/schedule";
 const FANVUE_AUTH_URL      = "https://auth.fanvue.com/oauth2/auth";
 const FANVUE_API_BASE      = "https://api.fanvue.com";
 const FANVUE_API_VERSION   = "2025-06-26";
@@ -89,11 +89,45 @@ async function generatePKCE() {
 }
 const PKCE_KEY = "fv_pkce"; const STATE_KEY = "fv_state";
 
+// ─────────────────────────────────────────────────────────────────────────────
+// PKCE verifier/state storage — COOKIE, not sessionStorage.
+//
+// WHY: sessionStorage is locked to the exact origin (protocol + host + port).
+// If you click "Connect" on madamlila.com but Fanvue redirects back to
+// www.madamlila.com (or vice versa) — which is extremely common with custom
+// domains — sessionStorage written on one host is invisible on the other,
+// and you get "PKCE verifier missing". A cookie with Domain=madamlila.com
+// (no leading subdomain) is shared between the apex domain and any
+// subdomain, so it survives that redirect either way.
+//
+// For platform preview URLs (e.g. *.vercel.app, localhost) we skip the
+// Domain attribute and fall back to a normal host-only cookie, since you
+// can't set a cookie Domain on a public suffix like vercel.app.
+// ─────────────────────────────────────────────────────────────────────────────
+function cookieDomainAttr(): string {
+  const host = window.location.hostname;
+  if (host === "localhost" || /^[\d.]+$/.test(host)) return "";
+  const labels = host.split(".");
+  if (labels.length > 3) return ""; // platform subdomain, e.g. *.vercel.app — keep host-only
+  const bare = host.replace(/^www\./, "");
+  return `; Domain=${bare}`;
+}
+function setPkceCookie(name: string, value: string, maxAgeSeconds = 600) {
+  document.cookie = `${name}=${encodeURIComponent(value)}; Max-Age=${maxAgeSeconds}; Path=/; Secure; SameSite=Lax${cookieDomainAttr()}`;
+}
+function getPkceCookie(name: string): string | null {
+  const m = document.cookie.match(new RegExp(`(?:^|; )${name}=([^;]*)`));
+  return m ? decodeURIComponent(m[1]) : null;
+}
+function clearPkceCookie(name: string) {
+  document.cookie = `${name}=; Max-Age=0; Path=/; Secure; SameSite=Lax${cookieDomainAttr()}`;
+}
+
 async function startFanvueOAuth() {
   const { verifier, challenge } = await generatePKCE();
   const state = crypto.randomUUID();
-  sessionStorage.setItem(PKCE_KEY, verifier);
-  sessionStorage.setItem(STATE_KEY, state);
+  setPkceCookie(PKCE_KEY, verifier);
+  setPkceCookie(STATE_KEY, state);
   const p = new URLSearchParams({
     client_id: FANVUE_CLIENT_ID, redirect_uri: FANVUE_REDIRECT_URI,
     response_type: "code",
@@ -112,10 +146,10 @@ async function startFanvueOAuth() {
 // Contents are shown at the bottom of this file as a comment.
 // ─────────────────────────────────────────────────────────────────────────────
 async function exchangeFanvueCode(code: string): Promise<StoredToken> {
-  const verifier = sessionStorage.getItem(PKCE_KEY);
+  const verifier = getPkceCookie(PKCE_KEY);
   if (!verifier) throw new Error("PKCE verifier missing — please click Connect again");
-  sessionStorage.removeItem(PKCE_KEY);
-  sessionStorage.removeItem(STATE_KEY);
+  clearPkceCookie(PKCE_KEY);
+  clearPkceCookie(STATE_KEY);
 
   log("Exchanging code via /api/fanvue-token…");
 
