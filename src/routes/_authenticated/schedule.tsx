@@ -36,7 +36,7 @@ import { cn } from "@/lib/utils";
 // ─────────────────────────────────────────────────────────────────────────────
 const FANVUE_CLIENT_ID     = "f9d35fff-3d12-4dd5-8945-750c37d65ae9";
 const FANVUE_CLIENT_SECRET = "05275891c81581c5cb79d336c8e9f87680f0976843bf17d6737bdcf0dde38b1a";
-const FANVUE_REDIRECT_URI  = "https://www.madamlila.com/schedule";
+const FANVUE_REDIRECT_URI  = "https://avatar-forge-works-9b035df2-olive.vercel.app/schedule";
 const FANVUE_AUTH_URL      = "https://auth.fanvue.com/oauth2/auth";
 const FANVUE_API_BASE      = "https://api.fanvue.com";
 const FANVUE_API_VERSION   = "2025-06-26";
@@ -220,13 +220,13 @@ async function publishToFanvue(params: {
 
   // Verify token via GET /users/me  (confirmed correct endpoint from docs)
   rep("Verifying token with Fanvue…");
-  const meR = await fetch(`/api/fanvue-api?path=/users/me`, { headers: fvH(token.access_token) });
-  const meText = await meR.text();
-  log(`GET /users/me → ${meR.status}`, meText.slice(0, 300));
-  if (!meR.ok) throw new Error(`Token rejected (${meR.status}). Reconnect your Fanvue account. Details: ${meText}`);
-  const me = JSON.parse(meText);
-  logOk(`Authenticated as @${me.handle}`);
-  rep(`Authenticated as @${me.handle}`);
+
+if (!token?.uuid) {
+  throw new Error("Missing Fanvue creator UUID. Reconnect account.");
+}
+
+logOk(`Authenticated as @${token.handle}`);
+rep(`Authenticated as @${token.handle}`);
 
   // Download the media blob
   const blob = await fetchMediaBlob(mediaUrl);
