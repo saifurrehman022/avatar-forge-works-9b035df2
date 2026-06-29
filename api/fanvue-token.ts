@@ -14,7 +14,7 @@
 
 const FANVUE_CLIENT_ID     = "f9d35fff-3d12-4dd5-8945-750c37d65ae9";
 const FANVUE_CLIENT_SECRET = "05275891c81581c5cb79d336c8e9f87680f0976843bf17d6737bdcf0dde38b1a";
-const FANVUE_REDIRECT_URI  = "https://avatar-forge-works-9b035df2-olive.vercel.app/schedule";
+const FANVUE_REDIRECT_URI  = "www.madamlila.com/schedule";
 const FANVUE_TOKEN_URL     = "https://auth.fanvue.com/oauth2/token";
 const FANVUE_API_BASE      = "https://api.fanvue.com";
 const FANVUE_API_VERSION   = "2025-06-26";
@@ -37,16 +37,25 @@ export default async function handler(req: any, res: any) {
     }
 
     // 1) Exchange the authorization code for tokens — server-to-server, no CORS issue here.
+    //
+    // IMPORTANT: this Fanvue app is registered with token_endpoint_auth_method
+    // = "client_secret_basic", so client_id/client_secret go in an HTTP Basic
+    // Authorization header — NOT as client_id/client_secret fields in the body
+    // (that's "client_secret_post", which is what the docs show by default,
+    // but Fanvue rejects it with 401 invalid_client for an app configured for Basic).
+    const basicAuth = Buffer.from(`${FANVUE_CLIENT_ID}:${FANVUE_CLIENT_SECRET}`).toString("base64");
+
     const tokenRes = await fetch(FANVUE_TOKEN_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Authorization: `Basic ${basicAuth}`,
+      },
       body: new URLSearchParams({
         grant_type:    "authorization_code",
         code,
         code_verifier,
         redirect_uri:  FANVUE_REDIRECT_URI,
-        client_id:     FANVUE_CLIENT_ID,
-        client_secret: FANVUE_CLIENT_SECRET,
       }).toString(),
     });
 
