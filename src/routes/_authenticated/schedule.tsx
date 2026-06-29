@@ -99,6 +99,7 @@ async function startFanvueOAuth() {
   const p = new URLSearchParams({
     client_id: FANVUE_CLIENT_ID, redirect_uri: FANVUE_REDIRECT_URI,
     response_type: "code",
+    audience: "https://api.fanvue.com",
     scope: "openid offline_access read:creator write:creator read:media write:media write:post",
     state, code_challenge: challenge, code_challenge_method: "S256",
   });
