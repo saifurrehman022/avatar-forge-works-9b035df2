@@ -50,6 +50,7 @@ export default async function handler(req: any, res: any) {
         code,
         redirect_uri: FANVUE_REDIRECT_URI,
         code_verifier,
+        scope: "read:creator write:creator write:posts write:media",
       }).toString(),
     });
 
