@@ -32,6 +32,7 @@ const nav = [
   { title: "Character Manager", url: "/characters", icon: UserCircle2 },
 ];
 
+const footerNav = [{ title: "Settings", url: "/settings", icon: Settings }];
 
 export function AppSidebar() {
   const { state } = useSidebar();
