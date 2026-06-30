@@ -593,8 +593,8 @@ function SchedulePanel({ items, isLoading }: { items: UpcomingPost[]; isLoading:
     <div className="rounded-xl border border-border/60 bg-card">
       <div className="flex items-center justify-between border-b border-border/60 px-5 py-4">
         <div>
-          <p className="text-sm font-semibold">Upcoming schedule</p>
-          <p className="text-xs text-muted-foreground">Next 48 hours</p>
+          <p className="text-sm font-semibold"></p>
+          <p className="text-xs text-muted-foreground"></p>
         </div>
         <Button asChild variant="ghost" size="sm" className="gap-1 text-xs text-muted-foreground">
           <Link to="/schedule">Open calendar <ArrowRight className="h-3 w-3" /></Link>
@@ -613,9 +613,9 @@ function SchedulePanel({ items, isLoading }: { items: UpcomingPost[]; isLoading:
           ))
         ) : items.length === 0 ? (
           <div className="px-5 py-8 text-center">
-            <p className="text-sm text-muted-foreground">Nothing scheduled yet.</p>
+            <p className="text-sm text-muted-foreground"></p>
             <Button asChild size="sm" variant="outline" className="mt-3 gap-1.5">
-              <Link to="/schedule"><CalendarPlus className="h-3.5 w-3.5" /> Schedule content</Link>
+              <Link to="/schedule"><CalendarPlus className="h-3.5 w-3.5" /></Link>
             </Button>
           </div>
         ) : (
