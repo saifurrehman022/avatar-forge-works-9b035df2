@@ -391,7 +391,7 @@ async function publishToFanvue(params: {
     text:       caption,
     mediaUuids: [mediaUuid],
     audience:   "followers-and-subscribers",
-    ...(freshMeta.postType === "ppv" ? { price: freshMeta.price } : {}),
+    
   };
   log("POST /posts", JSON.stringify(postBody));
   // FIX #1: use accessToken
