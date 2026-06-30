@@ -18,8 +18,6 @@ import {
   Heart,
   Save,
   Plus,
-  Edit3,
-  Trash2,
   Lock,
   Hash,
   Wand2,
@@ -53,8 +51,6 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
-
 import lilaAsset from "@/assets/lila-identity.jpg.asset.json";
 
 export const Route = createFileRoute("/_authenticated/characters")({
@@ -92,173 +88,6 @@ const FUTURE_THEMES = [
   { key: "parties", label: "Apartment Parties", icon: Flame },
   { key: "park", label: "Park Days with Apollo", icon: Trees },
 ] as const;
-
-type SceneTemplate = {
-  id: string;
-  name: string;
-  category: string;
-  intensity: "SFW" | "Edge-of-SFW" | "NSFW Teaser" | "PPV";
-  description: string;
-  prompt: string;
-};
-
-const SCENE_TEMPLATES: SceneTemplate[] = [
-  {
-    id: "s1",
-    name: "Morning Espresso, Loft Kitchen",
-    category: "kitchen",
-    intensity: "Edge-of-SFW",
-    description:
-      "Slow morning in the Boston loft, soft window light, oversized shirt, espresso machine glow.",
-    prompt:
-      "Lila in her Boston loft kitchen, warm morning light spilling through tall windows, wearing an oversized white shirt and gold necklace, pulling espresso, glossy hair, intimate cinematic 35mm.",
-  },
-  {
-    id: "s2",
-    name: "LUNA LUXE Studio Desk",
-    category: "workplace",
-    intensity: "SFW",
-    description:
-      "Creative director at her atelier desk — sketches, silk swatches, brand boards.",
-    prompt:
-      "Lila as creative director at the LUNA LUXE atelier, marble desk, silk lingerie swatches and mood boards, tailored blazer, focused expression, soft daylight, fashion editorial.",
-  },
-  {
-    id: "s3",
-    name: "Living Room, Golden Hour",
-    category: "living",
-    intensity: "Edge-of-SFW",
-    description:
-      "Curled up on a cream bouclé sofa, Apollo at her feet, vinyl playing.",
-    prompt:
-      "Lila on cream bouclé sofa in modern loft, golden hour, Apollo the yellow lab resting nearby, soft cashmere set, candid laugh, warm cinematic grade.",
-  },
-  {
-    id: "s4",
-    name: "Bedroom Silk Set",
-    category: "bedroom",
-    intensity: "NSFW Teaser",
-    description:
-      "Italian silk slip, low key lighting, linen sheets, mirror reflection.",
-    prompt:
-      "Lila in cream Italian silk slip, low-key bedroom lighting, linen sheets, antique mirror reflection, intimate eye contact, soft film grain.",
-  },
-  {
-    id: "s5",
-    name: "Storefront Reveal",
-    category: "storefront",
-    intensity: "SFW",
-    description:
-      "Standing in front of the LUNA LUXE Boston boutique window display.",
-    prompt:
-      "Lila in tailored trench in front of LUNA LUXE Boston boutique, illuminated window display behind her, brick sidewalk, dusk, cinematic.",
-  },
-  {
-    id: "s6",
-    name: "Apartment Window Shadows",
-    category: "apartment",
-    intensity: "NSFW Teaser",
-    description: "Sheer curtains, venetian blind shadows across skin.",
-    prompt:
-      "Lila silhouetted against tall loft windows, venetian blind shadows across skin, sheer curtain, dawn blue tones, painterly noir.",
-  },
-];
-
-type PromptTemplate = {
-  id: string;
-  name: string;
-  intensity: "SFW" | "Edge-of-SFW" | "NSFW Teaser" | "PPV";
-  template: string;
-  caption: string;
-};
-
-const PROMPT_TEMPLATES: PromptTemplate[] = [
-  {
-    id: "p1",
-    name: "Morning Home",
-    intensity: "Edge-of-SFW",
-    template:
-      "Lila waking up in her Boston loft, soft morning light, oversized shirt, glossy curls, [SCENE_DETAIL], cinematic 35mm, identity consistent.",
-    caption:
-      "Soft, flirty, Italian morning energy. Hint of romance. Italian phrase + emoji.",
-  },
-  {
-    id: "p2",
-    name: "Workplace",
-    intensity: "SFW",
-    template:
-      "Lila as creative director of LUNA LUXE, [SCENE_DETAIL], tailored fit, editorial styling, confident gaze, fashion magazine lighting.",
-    caption:
-      "Boss-coded, brand-forward. Drops LUNA LUXE naturally. Confident, never desperate.",
-  },
-  {
-    id: "p3",
-    name: "Evening Apartment",
-    intensity: "Edge-of-SFW",
-    template:
-      "Lila at home in her loft after dark, [SCENE_DETAIL], wine glass, candlelight, silk loungewear, warm intimate tone, painterly.",
-    caption:
-      "Slow, sultry, girlfriend-experience. Asks the audience a question.",
-  },
-  {
-    id: "p4",
-    name: "Weekend PPV",
-    intensity: "PPV",
-    template:
-      "Lila in private bedroom session, [SCENE_DETAIL], Italian silk, low-key lighting, intimate gaze, sensual cinematic, identity consistent.",
-    caption: "Hook + tease + paywall CTA. Promise an exclusive Saturday drop.",
-  },
-  {
-    id: "p5",
-    name: "Good Morning Saturday",
-    intensity: "NSFW Teaser",
-    template:
-      "Lila stretching in bed Saturday morning, [SCENE_DETAIL], soft cotton sheets, sleepy smile, sun across collarbones, intimate handheld feel.",
-    caption:
-      "Weekend ritual hook. Saturday is for her. Teases the PPV drop later.",
-  },
-];
-
-type IntensityPreset = {
-  id: string;
-  name: string;
-  promptStyle: string;
-  captionStyle: string;
-  negativePrompt: string;
-};
-
-const INTENSITY_PRESETS: IntensityPreset[] = [
-  {
-    id: "weekday",
-    name: "Weekday Edge-of-SFW",
-    promptStyle:
-      "Lifestyle, fashion-editorial framing. Suggestive but tasteful. Always covered.",
-    captionStyle:
-      "Playful, brand-leaning, Italian phrases, emoji-light, story-led.",
-    negativePrompt:
-      "nudity, explicit, distorted face, extra fingers, watermark, low quality, identity drift",
-  },
-  {
-    id: "friday",
-    name: "Friday NSFW Teaser",
-    promptStyle:
-      "Lingerie-forward, low-key lighting, sensual cinematic. Implied, never explicit.",
-    captionStyle:
-      "Slower cadence, second-person, romantic tension, hint at PPV drop tomorrow.",
-    negativePrompt:
-      "explicit nudity, child, distorted face, extra limbs, deformed hands, watermark, identity drift",
-  },
-  {
-    id: "saturday",
-    name: "Saturday PPV Video",
-    promptStyle:
-      "Long-form intimate video, silk + bedroom, cinematic intimate, identity locked.",
-    captionStyle:
-      "Hook → tease → CTA. Premium, exclusive language. Paywall framing.",
-    negativePrompt:
-      "explicit underage, deformed face, plastic skin, extra fingers, watermark, identity drift, blurry",
-  },
-];
 
 const VOICE_FIELDS = [
   { label: "Voice Clone", value: "Lila (custom clone)" },
