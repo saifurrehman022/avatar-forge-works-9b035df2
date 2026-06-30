@@ -12,13 +12,11 @@ import {
   Sparkles,
   Layers,
   MapPin,
-  Mic,
   ShieldCheck,
   Camera,
   Heart,
   Save,
   Plus,
-  Lock,
   Hash,
   Wand2,
   BookOpen,
@@ -49,9 +47,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import lilaAsset from "@/assets/lila-identity.jpg.asset.json";
 
 export const Route = createFileRoute("/_authenticated/characters")({
   head: () => ({
@@ -88,15 +84,6 @@ const FUTURE_THEMES = [
   { key: "parties", label: "Apartment Parties", icon: Flame },
   { key: "park", label: "Park Days with Apollo", icon: Trees },
 ] as const;
-
-const VOICE_FIELDS = [
-  { label: "Voice Clone", value: "Lila (custom clone)" },
-  { label: "Voice Provider", value: "ElevenLabs" },
-  { label: "Speech Style", value: "Warm, slow, flirty" },
-  { label: "Accent", value: "Soft Italian-American" },
-  { label: "Language", value: "English / Italian" },
-  { label: "Voice ID", value: "lila_v1_xxxxxxxx" },
-];
 
 const HASHTAGS = ["#LUNALUXE", "#ItalianFire", "#SexyAndUnapologetic"];
 
@@ -224,7 +211,6 @@ function CharactersPage() {
     { label: "Scene Templates", value: String(scenes.length), hint: "in library", icon: Layers, accent: "chart-4" as const },
     { label: "Prompt Templates", value: String(prompts.length), hint: "ready to fire", icon: Sparkles, accent: "primary" as const },
     { label: "Intensity Presets", value: String(presets.length), hint: "Tones bundled", icon: MapPin, accent: "chart-3" as const },
-    { label: "Voice Profile", value: "Pending", hint: "Awaiting clone upload", icon: Mic, accent: "chart-5" as const },
   ];
 
   return (
@@ -259,10 +245,7 @@ function CharactersPage() {
 
           <IdentitySection />
 
-          <div className="grid grid-cols-1 gap-6 xl:grid-cols-[2fr_1fr]">
-            <PersonaSection persona={persona} setPersona={setPersona} />
-            <ConsistencySection />
-          </div>
+          <ConsistencySection />
 
           <Tabs defaultValue="scenes" className="w-full">
             <TabsList className="bg-card/60">
@@ -281,7 +264,7 @@ function CharactersPage() {
           </Tabs>
 
           <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1fr_1fr]">
-            <VoiceProfileSection />
+            <ReviewCaptionsSection />
             <MemorySection memory={memory} setMemory={setMemory} />
           </div>
         </main>
@@ -309,7 +292,7 @@ function IdentitySection() {
       <CardContent className="grid grid-cols-1 gap-0 p-0 lg:grid-cols-[360px_1fr]">
         <div className="relative h-[420px] lg:h-auto">
           <img
-            src={lilaAsset.url}
+            src="https://huggingface.co/buckets/KKKONNK/used123/resolve/Screenshot%202026-06-30%20144020.png?download=true"
             alt="Lila Valentina Rossi — primary identity reference"
             className="absolute inset-0 h-full w-full object-cover"
           />
@@ -369,114 +352,6 @@ function IdentitySection() {
                 </Badge>
               ))}
             </div>
-          </div>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-function PersonaSection({
-  persona,
-  setPersona,
-}: {
-  persona: {
-    traits: string[];
-    writingStyle: string;
-    captionTone: string;
-    brandVoice: string;
-    description: string;
-  };
-  setPersona: React.Dispatch<React.SetStateAction<any>>;
-}) {
-  const toggleTrait = (t: string) => {
-    setPersona((p: any) => ({
-      ...p,
-      traits: p.traits.includes(t)
-        ? p.traits.filter((x: string) => x !== t)
-        : [...p.traits, t],
-    }));
-  };
-
-  return (
-    <Card className="border-border/60 bg-card/80">
-      <CardContent className="space-y-6 p-6 md:p-8">
-        <div className="flex items-center justify-between">
-          <div>
-            <h3 className="font-display text-lg font-semibold">
-              Persona Settings
-            </h3>
-            <p className="text-sm text-muted-foreground">
-              These signals steer every caption, scene, and script.
-            </p>
-          </div>
-          <Sparkles className="h-5 w-5 text-primary" />
-        </div>
-
-        <div>
-          <Label className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-            Personality Traits
-          </Label>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {TRAITS.map((t) => {
-              const active = persona.traits.includes(t);
-              return (
-                <button
-                  key={t}
-                  onClick={() => toggleTrait(t)}
-                  className={`rounded-full border px-3 py-1 text-xs transition ${
-                    active
-                      ? "border-primary/40 bg-primary/15 text-primary"
-                      : "border-border bg-background/40 text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  {t}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          <div className="space-y-2">
-            <Label>Writing Style</Label>
-            <Textarea
-              rows={3}
-              value={persona.writingStyle}
-              onChange={(e) =>
-                setPersona((p: any) => ({ ...p, writingStyle: e.target.value }))
-              }
-            />
-          </div>
-          <div className="space-y-2">
-            <Label>Caption Tone</Label>
-            <Textarea
-              rows={3}
-              value={persona.captionTone}
-              onChange={(e) =>
-                setPersona((p: any) => ({ ...p, captionTone: e.target.value }))
-              }
-            />
-          </div>
-          <div className="space-y-2 md:col-span-2">
-            <Label>Brand Voice</Label>
-            <Textarea
-              rows={2}
-              value={persona.brandVoice}
-              onChange={(e) =>
-                setPersona((p: any) => ({ ...p, brandVoice: e.target.value }))
-              }
-            />
-          </div>
-          <div className="space-y-2 md:col-span-2">
-            <Label>Persona Description</Label>
-            <Textarea
-              rows={5}
-              value={persona.description}
-              onChange={(e) =>
-                setPersona((p: any) => ({ ...p, description: e.target.value }))
-              }
-            />
           </div>
         </div>
       </CardContent>
@@ -799,61 +674,74 @@ function DefaultsPanel({
   );
 }
 
-function VoiceProfileSection() {
+type ReviewPostMeta = { postType: "normal" | "ppv"; price: number; caption: string };
+const REVIEW_POST_META_KEY = "lila_review_post_meta"; // MUST match review.tsx exactly
+
+function ReviewCaptionsSection() {
+  const [entries, setEntries] = useState<Array<{ contentId: string } & ReviewPostMeta>>([]);
+
+  const load = () => {
+    try {
+      const raw = localStorage.getItem(REVIEW_POST_META_KEY);
+      const map: Record<string, ReviewPostMeta> = raw ? JSON.parse(raw) : {};
+      const list = Object.entries(map)
+        .map(([contentId, meta]) => ({ contentId, ...meta }))
+        .filter((e) => e.caption?.trim());
+      setEntries(list.slice(-30).reverse());
+    } catch {
+      setEntries([]);
+    }
+  };
+
+  useEffect(() => {
+    load();
+    const onStorage = (e: StorageEvent) => { if (e.key === REVIEW_POST_META_KEY) load(); };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
   return (
-    <Card className="relative overflow-hidden border-border/60 bg-card/60">
-      <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-primary/5 via-transparent to-chart-2/5" />
-      <CardContent className="relative space-y-5 p-6 md:p-8">
-        <div className="flex items-start justify-between gap-3">
+    <Card className="border-border/60 bg-card/80">
+      <CardContent className="space-y-5 p-6 md:p-8">
+        <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <div className="grid h-10 w-10 place-items-center rounded-xl bg-primary/10">
-              <Mic className="h-5 w-5 text-primary" />
-            </div>
+            <BookOpen className="h-5 w-5 text-primary" />
             <div>
-              <h3 className="font-display text-lg font-semibold">
-                Voice Profile
-              </h3>
+              <h3 className="font-display text-lg font-semibold">Captions from Review</h3>
               <p className="text-xs text-muted-foreground">
-                Future: voice chat + script narration automation
+                Every caption set on an image or video in the Review Queue, synced here.
               </p>
             </div>
           </div>
-          <Badge
-            variant="outline"
-            className="gap-1 border-warning/40 bg-warning/10 text-warning"
-          >
-            <Lock className="h-3 w-3" /> Coming soon
-          </Badge>
+          <Button size="sm" variant="ghost" onClick={load}>Refresh</Button>
         </div>
 
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          {VOICE_FIELDS.map((v) => (
-            <div
-              key={v.label}
-              className="rounded-lg border border-dashed border-border/60 bg-background/30 p-3 opacity-70"
-            >
-              <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                {v.label}
+        {entries.length === 0 ? (
+          <p className="rounded-lg border border-dashed border-border/60 bg-muted/20 p-6 text-center text-sm text-muted-foreground">
+            No captions saved yet. Set a caption on an image or video in the Review Queue to see it here.
+          </p>
+        ) : (
+          <div className="max-h-[420px] space-y-3 overflow-y-auto pr-1">
+            {entries.map((e) => (
+              <div key={e.contentId} className="rounded-lg border border-border/60 bg-background/40 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <Badge
+                    variant="outline"
+                    className={
+                      e.postType === "ppv"
+                        ? "border-chart-4/40 bg-chart-4/15 text-chart-4"
+                        : "border-border bg-muted text-muted-foreground"
+                    }
+                  >
+                    {e.postType === "ppv" ? `PPV · $${e.price}` : "Normal"}
+                  </Badge>
+                  <span className="truncate font-mono text-[10px] text-muted-foreground">{e.contentId.slice(0, 8)}</span>
+                </div>
+                <p className="mt-2 text-sm leading-relaxed text-foreground/90">{e.caption}</p>
               </div>
-              <div className="mt-1 text-sm text-muted-foreground">
-                {v.value}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <div className="flex items-center justify-between rounded-xl border border-border/60 bg-background/40 p-4">
-          <div className="flex items-center gap-3">
-            <Mic className="h-4 w-4 text-muted-foreground" />
-            <div>
-              <div className="text-sm font-medium">Enable voice automation</div>
-              <div className="text-xs text-muted-foreground">
-                Wire ElevenLabs clone into captions + scripts
-              </div>
-            </div>
+            ))}
           </div>
-          <Switch disabled />
-        </div>
+        )}
       </CardContent>
     </Card>
   );
