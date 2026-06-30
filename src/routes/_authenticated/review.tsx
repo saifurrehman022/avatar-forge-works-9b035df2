@@ -5,19 +5,17 @@ import {
   ClipboardCheck,
   CheckCircle2,
   XCircle,
-  RotateCcw,
   Search,
   Image as ImageIcon,
-  Video as VideoIcon,
   Play,
-  ArrowLeft,
-  FileText,
   Sparkles,
   Filter,
   Inbox,
   Film,
   CalendarPlus,
   Library,
+  DollarSign,
+  Tag,
 } from "lucide-react";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
@@ -87,12 +85,22 @@ export const Route = createFileRoute("/_authenticated/review")({
 
 type ReviewStatus = "pending" | "approved" | "rejected" | "scheduled" | "published";
 type ContentType = "image" | "video";
+type PostType = "normal" | "ppv";
+
+const PPV_PRICE_PRESETS = [5, 15, 20];
 
 type HistoryEvent = {
   at: string;
   label: string;
   kind: "generated" | "queued" | "approved" | "rejected" | "regenerated" | "scheduled" | "published";
   by?: string;
+};
+
+// Post meta is kept ENTIRELY client-side — no Supabase columns required.
+type PostMeta = {
+  postType: PostType;
+  price: number;
+  caption: string;
 };
 
 type ReviewItem = {
@@ -106,20 +114,42 @@ type ReviewItem = {
   createdAt: string;
   status: ReviewStatus;
   jobId: string;
-  settings: { fps: number; framesPerScene: number; numScenes: number; samplingSteps: number };
-  scenes: string[];
-  negativePrompt: string;
+  prompt: string;        // original prompt, used only as caption fallback
+  postMeta: PostMeta;     // local-only
   notes?: string;
   history: HistoryEvent[];
 };
 
 const EMPTY_REVIEW_ITEMS: ReviewItem[] = [];
-const NEG_DEFAULT = "low quality, blurry, extra limbs, distorted face, watermark, text, deformed hands";
 const PLACEHOLDER_IMG = "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=800&q=80";
 
+// ---------- Local-only post-meta storage ----------
+// Keyed by contentId. Persisted to localStorage so it survives refresh,
+// but never touches Supabase — avoids needing new DB columns.
+
+const POST_META_STORAGE_KEY = "lila_review_post_meta";
+
+function loadPostMetaMap(): Record<string, PostMeta> {
+  try {
+    if (typeof window === "undefined") return {};
+    const raw = localStorage.getItem(POST_META_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+
+function savePostMetaMap(map: Record<string, PostMeta>) {
+  try {
+    if (typeof window === "undefined") return;
+    localStorage.setItem(POST_META_STORAGE_KEY, JSON.stringify(map));
+  } catch { /* ignore quota errors */ }
+}
+
+function defaultPostMeta(caption: string): PostMeta {
+  return { postType: "normal", price: PPV_PRICE_PRESETS[0], caption };
+}
+
 // ---------- Data Loading ----------
-// Queries images + videos directly (same as library) so ALL generated content
-// appears here automatically. review_queue rows are merged in for status/notes.
+// Only touches existing columns — no post_type / price / caption in the DB.
 
 async function fetchQueue(): Promise<ReviewItem[]> {
   const [imgRes, vidRes, queueRes, charRes] = await Promise.all([
@@ -137,13 +167,11 @@ async function fetchQueue(): Promise<ReviewItem[]> {
 
   const charMap = new Map((charRes.data ?? []).map((c: any) => [c.id, c]));
 
-  // Lookup: content_id -> queue row (for status, notes, reviewed_at)
   const queueByContentId = new Map<string, any>();
   for (const row of queueRes.data ?? []) {
     queueByContentId.set(row.content_id, row);
   }
 
-  // Derive status: queue row wins, then content publish_status, then content status
   function deriveStatus(qRow: any, contentRow: any): ReviewStatus {
     if (qRow?.status === "scheduled") return "scheduled";
     if (qRow?.status === "approved")  return "approved";
@@ -173,9 +201,8 @@ async function fetchQueue(): Promise<ReviewItem[]> {
       createdAt: img.created_at,
       status,
       jobId: img.id,
-      settings: { fps: 0, framesPerScene: 0, numScenes: 1, samplingSteps: 0 },
-      scenes: img.prompt ? [img.prompt] : ["—"],
-      negativePrompt: NEG_DEFAULT,
+      prompt: img.prompt ?? "",
+      postMeta: defaultPostMeta(img.prompt ?? ""), // overridden later from localStorage
       notes: qRow?.notes ?? undefined,
       history: [
         { at: img.created_at, label: "Generated", kind: "generated" as const },
@@ -194,10 +221,10 @@ async function fetchQueue(): Promise<ReviewItem[]> {
     const char: any = vid.character_id ? charMap.get(vid.character_id) : null;
     const qRow = queueByContentId.get(vid.id);
     const status = deriveStatus(qRow, vid);
-    const scenes: string[] = Array.isArray(vid.scene_prompts)
-      ? (vid.scene_prompts as unknown[]).map(String)
-      : vid.prompt ? [vid.prompt] : [];
     const media = vid.video_url || PLACEHOLDER_IMG;
+    const fallbackCaption: string =
+      vid.prompt ??
+      (Array.isArray(vid.scene_prompts) && vid.scene_prompts.length ? String(vid.scene_prompts[0]) : "");
     items.push({
       id: qRow?.id ?? `vid-${vid.id}`,
       contentId: vid.id,
@@ -209,9 +236,8 @@ async function fetchQueue(): Promise<ReviewItem[]> {
       createdAt: vid.created_at,
       status,
       jobId: vid.id,
-      settings: { fps: 16, framesPerScene: 257, numScenes: scenes.length || 1, samplingSteps: 29 },
-      scenes: scenes.length ? scenes : ["—"],
-      negativePrompt: NEG_DEFAULT,
+      prompt: fallbackCaption,
+      postMeta: defaultPostMeta(fallbackCaption),
       notes: qRow?.notes ?? undefined,
       history: [
         { at: vid.created_at, label: "Generated", kind: "generated" as const },
@@ -225,10 +251,8 @@ async function fetchQueue(): Promise<ReviewItem[]> {
     });
   }
 
-  // Sort newest first
   return items.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 }
-
 
 // ---------- Helpers ----------
 
@@ -257,6 +281,21 @@ function StatusBadge({ status }: { status: ReviewStatus }) {
   );
 }
 
+function PostTypeBadge({ postMeta }: { postMeta: PostMeta }) {
+  if (postMeta.postType === "ppv") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full border border-chart-4/30 bg-chart-4/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-chart-4">
+        <DollarSign className="h-3 w-3" /> PPV · ${postMeta.price}
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/50 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+      <Tag className="h-3 w-3" /> Normal
+    </span>
+  );
+}
+
 function timeAgo(iso: string) {
   const diff = (Date.now() - new Date(iso).getTime()) / 1000;
   if (diff < 60) return `${Math.round(diff)}s ago`;
@@ -265,7 +304,9 @@ function timeAgo(iso: string) {
   return `${Math.round(diff / 86400)}d ago`;
 }
 
-// ---------- Schedule Dialog (same as library) ----------
+// ---------- Schedule Dialog ----------
+// Only writes existing columns to Supabase. Post meta (type/price/caption) is
+// shown for confirmation but NOT persisted server-side — purely informational.
 
 type ConnectedAccount = { id: string; name: string; status: string };
 
@@ -300,7 +341,7 @@ function ScheduleDialog({ item, onClose, onScheduled }: {
       const iso = new Date(`${date}T${time}:00`).toISOString();
       const { data: userRes } = await supabase.auth.getUser();
 
-      // 1. Insert into schedules table
+      // Only existing columns — no post_type/price/caption written here.
       const { error: schedErr } = await supabase.from("schedules").insert({
         content_type: item.type,
         content_id: item.contentId,
@@ -311,22 +352,21 @@ function ScheduleDialog({ item, onClose, onScheduled }: {
       });
       if (schedErr) throw schedErr;
 
-      // 2. Update the underlying image/video row
       const table = item.type === "image" ? "images" : "videos";
       await supabase.from(table).update({
         publish_status: "scheduled",
         ...(accountId ? { connected_account_id: accountId } : {}),
       }).eq("id", item.contentId);
 
-      // 3. Update review_queue row status to scheduled
       await supabase.from("review_queue").update({
         status: "scheduled",
         reviewed_at: new Date().toISOString(),
       }).eq("id", item.id);
 
-      toast.success(`Scheduled for ${new Date(iso).toLocaleString()}`, {
-        action: { label: "View Library", onClick: () => window.location.href = "/library" },
-      });
+      toast.success(
+        `Scheduled${item.postMeta.postType === "ppv" ? ` as PPV ($${item.postMeta.price})` : ""} for ${new Date(iso).toLocaleString()}`,
+        { action: { label: "View Library", onClick: () => window.location.href = "/library" } },
+      );
       onScheduled(item.id);
       onClose();
     } catch (err: any) {
@@ -344,6 +384,17 @@ function ScheduleDialog({ item, onClose, onScheduled }: {
           <DialogDescription>Pick a date, time and Fanvue account to publish to.</DialogDescription>
         </DialogHeader>
         <div className="space-y-4 py-2">
+          {item && (
+            <div className="space-y-2 rounded-lg border border-border bg-muted/20 px-3 py-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-muted-foreground">Post type</span>
+                <PostTypeBadge postMeta={item.postMeta} />
+              </div>
+              {item.postMeta.caption && (
+                <p className="line-clamp-2 text-xs text-muted-foreground">"{item.postMeta.caption}"</p>
+              )}
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <Label>Date</Label>
@@ -397,9 +448,18 @@ function ReviewPage() {
   });
 
   const [items, setItems] = useState<ReviewItem[]>([]);
-  useEffect(() => setItems(queueItems), [queueItems]);
 
-  // Realtime
+  // Merge fetched items with locally-stored post meta whenever the query refreshes.
+  useEffect(() => {
+    const metaMap = loadPostMetaMap();
+    setItems(
+      queueItems.map((i) => ({
+        ...i,
+        postMeta: metaMap[i.contentId] ?? i.postMeta,
+      })),
+    );
+  }, [queueItems]);
+
   useEffect(() => {
     const ch = supabase
       .channel("review-queue-rt")
@@ -424,6 +484,11 @@ function ReviewPage() {
   const [typeFilter, setTypeFilter] = useState<ContentType | "all">("all");
   const [noteDraft, setNoteDraft] = useState("");
 
+  // Draft post-meta for the open item — committed to local state/localStorage on Save.
+  const [draftPostType, setDraftPostType] = useState<PostType>("normal");
+  const [draftPrice, setDraftPrice] = useState<number>(PPV_PRICE_PRESETS[0]);
+  const [draftCaption, setDraftCaption] = useState<string>("");
+
   const openItem = items.find((i) => i.id === openId) ?? null;
 
   const filtered = useMemo(() => {
@@ -435,7 +500,7 @@ function ReviewPage() {
       return (
         i.character.toLowerCase().includes(q) ||
         i.jobId.toLowerCase().includes(q) ||
-        i.scenes.some((s) => s.toLowerCase().includes(q))
+        i.postMeta.caption.toLowerCase().includes(q)
       );
     });
   }, [items, search, statusFilter, typeFilter]);
@@ -448,17 +513,14 @@ function ReviewPage() {
     rejected: items.filter((i) => i.status === "rejected").length,
   }), [items]);
 
-  // ---- Core actions ----
+  // ---- Core actions (unchanged Supabase calls — only existing columns) ----
 
   const updateLocalStatus = (id: string, status: ReviewStatus, evt: HistoryEvent) =>
     setItems((arr) => arr.map((i) => i.id === id ? { ...i, status, history: [...i.history, evt] } : i));
 
-  // If an item was generated without a queue row (no review_queue insert happened),
-  // we create the row on first action then update it.
   const ensureQueueRow = async (item: ReviewItem): Promise<string> => {
     const hasRealId = !item.id.startsWith("img-") && !item.id.startsWith("vid-");
-    if (hasRealId) return item.id; // already a real uuid queue row
-    // Insert a new queue row and return its id
+    if (hasRealId) return item.id;
     const { data, error } = await supabase.from("review_queue").insert({
       content_type: item.type,
       content_id: item.contentId,
@@ -468,7 +530,6 @@ function ReviewPage() {
       notes: null,
     }).select("id").single();
     if (error) throw error;
-    // Update local item id so subsequent actions use the real id
     setItems((arr) => arr.map((i) => i.id === item.id ? { ...i, id: data.id } : i));
     return data.id;
   };
@@ -478,21 +539,17 @@ function ReviewPage() {
     if (!item) return;
     const now = new Date().toISOString();
 
-    // Optimistic update
     updateLocalStatus(id, "approved", { at: now, label: "Approved", kind: "approved" });
 
     try {
-      // Ensure a queue row exists, get its real uuid
       const queueId = await ensureQueueRow(item);
 
-      // 1. Update review_queue row
       const { error: rqErr } = await supabase.from("review_queue").update({
         status: "approved",
         reviewed_at: now,
       }).eq("id", queueId);
       if (rqErr) throw rqErr;
 
-      // 2. Update underlying content row status → "approved"
       const table = item.type === "image" ? "images" : "videos";
       const { error: contentErr } = await supabase.from(table).update({ status: "approved" }).eq("id", item.contentId);
       if (contentErr) throw contentErr;
@@ -549,17 +606,44 @@ function ReviewPage() {
     } catch (e: any) { toast.error(e?.message ?? "Failed to save note"); }
   };
 
+  // Local-only — writes to localStorage, never to Supabase.
+  const savePostMeta = (id: string) => {
+    const item = items.find((i) => i.id === id);
+    if (!item) return;
+
+    const updated: PostMeta = {
+      postType: draftPostType,
+      price: draftPostType === "ppv" ? draftPrice : 0,
+      caption: draftCaption,
+    };
+
+    setItems((arr) => arr.map((i) => (i.id === id ? { ...i, postMeta: updated } : i)));
+
+    const map = loadPostMetaMap();
+    map[item.contentId] = updated;
+    savePostMetaMap(map);
+
+    toast.success("Post details saved");
+  };
+
   const toggleSelect = (id: string) =>
     setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
 
   const bulkApprove = () => { selected.forEach((id) => approve(id)); setSelected([]); };
   const bulkReject  = () => { selected.forEach((id) => reject(id));  setSelected([]); };
 
-  // When schedule dialog succeeds, update local state
   const onScheduled = (id: string) => {
     updateLocalStatus(id, "scheduled", { at: new Date().toISOString(), label: "Scheduled", kind: "scheduled" });
     queryClient.invalidateQueries({ queryKey: ["review-queue"] });
     queryClient.invalidateQueries({ queryKey: ["library"] });
+  };
+
+  const openDetail = (item: ReviewItem) => {
+    setOpenId(item.id);
+    setNoteDraft(item.notes ?? "");
+    setDraftPostType(item.postMeta.postType);
+    setDraftPrice(item.postMeta.price || PPV_PRICE_PRESETS[0]);
+    setDraftCaption(item.postMeta.caption);
   };
 
   return (
@@ -568,7 +652,6 @@ function ReviewPage() {
       <SidebarInset>
         <AppHeader />
         <main className="flex flex-1 flex-col gap-6 p-6 lg:p-8">
-          {/* Page header */}
           <div className="flex flex-col gap-2">
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <ClipboardCheck className="h-3.5 w-3.5" />
@@ -578,7 +661,7 @@ function ReviewPage() {
               <div>
                 <h1 className="font-display text-3xl font-semibold tracking-tight">Review Queue</h1>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  Approve or reject AI-generated content. Approved content can be scheduled directly from here.
+                  Approve or reject content, set pricing &amp; caption, then schedule directly from here.
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -598,7 +681,6 @@ function ReviewPage() {
             </div>
           </div>
 
-          {/* Stats */}
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
             <DashboardCard label="Total in Queue" value={stats.total} icon={ClipboardCheck} accent="primary" />
             <DashboardCard label="Pending" value={stats.pending} icon={ClipboardCheck} accent="chart-4" hint="awaiting review" />
@@ -607,13 +689,12 @@ function ReviewPage() {
             <DashboardCard label="Rejected" value={stats.rejected} icon={XCircle} accent="chart-5" />
           </div>
 
-          {/* Filters */}
           <Card className="border-border/60 bg-card/60">
             <CardContent className="flex flex-col gap-3 p-4 lg:flex-row lg:items-center">
               <div className="relative flex-1">
                 <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <Input value={search} onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search by character, prompt, scene or job ID…" className="pl-9" />
+                  placeholder="Search by character, caption or job ID…" className="pl-9" />
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v as ReviewStatus | "all")}>
@@ -642,7 +723,6 @@ function ReviewPage() {
             </CardContent>
           </Card>
 
-          {/* Bulk bar */}
           {selected.length > 0 && (
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-primary/30 bg-primary/5 px-4 py-2.5">
               <p className="text-sm">
@@ -660,7 +740,6 @@ function ReviewPage() {
             </div>
           )}
 
-          {/* Grid */}
           {isLoading ? (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
               {Array.from({ length: 8 }).map((_, i) => (
@@ -677,7 +756,7 @@ function ReviewPage() {
                   item={item}
                   selected={selected.includes(item.id)}
                   onToggle={() => toggleSelect(item.id)}
-                  onOpen={() => { setOpenId(item.id); setNoteDraft(item.notes ?? ""); }}
+                  onOpen={() => openDetail(item)}
                   onApprove={() => approve(item.id)}
                   onReject={() => reject(item.id)}
                   onSchedule={() => setScheduleItem(item)}
@@ -687,7 +766,6 @@ function ReviewPage() {
           )}
         </main>
 
-        {/* Detail sheet */}
         <Sheet open={!!openItem} onOpenChange={(o) => !o && setOpenId(null)}>
           <SheetContent side="right" className="w-full overflow-y-auto p-0 sm:max-w-2xl">
             {openItem && (
@@ -696,6 +774,13 @@ function ReviewPage() {
                 noteDraft={noteDraft}
                 onNoteChange={setNoteDraft}
                 onSaveNote={() => saveNote(openItem.id)}
+                draftPostType={draftPostType}
+                setDraftPostType={setDraftPostType}
+                draftPrice={draftPrice}
+                setDraftPrice={setDraftPrice}
+                draftCaption={draftCaption}
+                setDraftCaption={setDraftCaption}
+                onSavePostMeta={() => savePostMeta(openItem.id)}
                 onApprove={() => approve(openItem.id)}
                 onReject={() => reject(openItem.id)}
                 onSchedule={() => { setScheduleItem(openItem); setOpenId(null); }}
@@ -704,7 +789,6 @@ function ReviewPage() {
           </SheetContent>
         </Sheet>
 
-        {/* Schedule dialog */}
         <ScheduleDialog
           item={scheduleItem}
           onClose={() => setScheduleItem(null)}
@@ -758,6 +842,7 @@ function QueueCard({
               {item.type}
             </span>
             <StatusBadge status={item.status} />
+            <PostTypeBadge postMeta={item.postMeta} />
           </div>
         </div>
 
@@ -771,12 +856,12 @@ function QueueCard({
 
         <div className="absolute inset-x-0 bottom-0 p-3">
           <p className="font-medium text-foreground">{item.character}</p>
-          <p className="text-xs text-muted-foreground">{timeAgo(item.createdAt)} · {item.jobId.slice(0, 8)}</p>
+          <p className="line-clamp-1 text-xs text-muted-foreground">{item.postMeta.caption || "No caption"}</p>
+          <p className="text-[11px] text-muted-foreground/80">{timeAgo(item.createdAt)} · {item.jobId.slice(0, 8)}</p>
         </div>
       </div>
 
       <CardContent className="flex items-center gap-2 p-3 bg-card relative z-10">
-        {/* If approved → show Schedule button prominently */}
         {isApproved ? (
           <>
             <Button size="sm" variant="outline" className="flex-1" onClick={onReject}>
@@ -796,7 +881,7 @@ function QueueCard({
               <XCircle className="mr-1 h-3.5 w-3.5" /> Reject
             </Button>
             <Button size="sm" className="flex-1" onClick={onApprove}>
-              <CheckCircle2 className="mr-1 h-3.5 w-3.5" /> Approve
+              <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" /> Approve
             </Button>
           </>
         )}
@@ -808,18 +893,32 @@ function QueueCard({
 // ---------- Detail Panel ----------
 
 function DetailPanel({
-  item, noteDraft, onNoteChange, onSaveNote, onApprove, onReject, onSchedule,
+  item, noteDraft, onNoteChange, onSaveNote,
+  draftPostType, setDraftPostType, draftPrice, setDraftPrice, draftCaption, setDraftCaption, onSavePostMeta,
+  onApprove, onReject, onSchedule,
 }: {
   item: ReviewItem;
   noteDraft: string;
   onNoteChange: (v: string) => void;
   onSaveNote: () => void;
+  draftPostType: PostType;
+  setDraftPostType: (v: PostType) => void;
+  draftPrice: number;
+  setDraftPrice: (v: number) => void;
+  draftCaption: string;
+  setDraftCaption: (v: string) => void;
+  onSavePostMeta: () => void;
   onApprove: () => void;
   onReject: () => void;
   onSchedule: () => void;
 }) {
   const isApproved = item.status === "approved";
   const isScheduled = item.status === "scheduled";
+
+  const isDirty =
+    draftPostType !== item.postMeta.postType ||
+    draftCaption !== item.postMeta.caption ||
+    (draftPostType === "ppv" && draftPrice !== item.postMeta.price);
 
   return (
     <div className="flex h-full flex-col">
@@ -837,7 +936,7 @@ function DetailPanel({
 
       <ScrollArea className="flex-1">
         <div className="space-y-6 px-6 py-6">
-          {/* Media preview — video vs image */}
+          {/* Media preview */}
           <div className="relative overflow-hidden rounded-xl border border-border/60 bg-muted">
             {item.type === "video" ? (
               <video src={item.preview} controls playsInline className="w-full object-cover aspect-video" />
@@ -846,32 +945,26 @@ function DetailPanel({
             )}
           </div>
 
-          {/* Action buttons */}
-          <div className={cn("grid gap-2", isApproved || isScheduled ? "grid-cols-2" : "grid-cols-3")}>
+          {/* Approve / Reject / Schedule */}
+          <div className={cn("grid gap-2", isApproved || isScheduled ? "grid-cols-2" : "grid-cols-2")}>
             {!isScheduled && (
               <Button variant="outline" onClick={onReject} disabled={item.status === "rejected"}>
                 <XCircle className="mr-1.5 h-4 w-4" /> Reject
               </Button>
             )}
             {!isApproved && !isScheduled && (
-              <Button variant="outline" onClick={onApprove}>
+              <Button onClick={onApprove}>
                 <CheckCircle2 className="mr-1.5 h-4 w-4" /> Approve
               </Button>
             )}
             {(isApproved || isScheduled) && (
-              <Button onClick={onSchedule} disabled={isScheduled} className="gap-1.5">
+              <Button onClick={onSchedule} disabled={isScheduled} className="gap-1.5 col-span-1">
                 <CalendarPlus className="h-4 w-4" />
                 {isScheduled ? "Scheduled ✓" : "Schedule now"}
               </Button>
             )}
-            {!isApproved && !isScheduled && (
-              <Button onClick={onApprove} disabled={isApproved}>
-                <CheckCircle2 className="mr-1.5 h-4 w-4" /> Approve
-              </Button>
-            )}
           </div>
 
-          {/* Approved callout */}
           {isApproved && (
             <div className="rounded-lg border border-success/30 bg-success/5 px-3 py-2.5">
               <p className="text-sm font-medium text-success">✓ Approved — click "Schedule now" to set a publish time</p>
@@ -880,50 +973,100 @@ function DetailPanel({
 
           <Separator />
 
-          {/* Generation details */}
-          <section className="space-y-3">
-            <h3 className="flex items-center gap-2 text-sm font-semibold">
-              <Sparkles className="h-4 w-4 text-primary" /> Generation details
-            </h3>
-            <div className="flex gap-4">
-              <img src={item.referenceImage} alt="reference" className="h-28 w-24 rounded-lg border border-border/60 object-cover" />
-              <div className="grid flex-1 grid-cols-2 gap-2 text-xs">
-                <Stat label="FPS" value={item.settings.fps || "—"} />
-                <Stat label="Frames / scene" value={item.settings.framesPerScene || "—"} />
-                <Stat label="Scenes" value={item.settings.numScenes} />
-                <Stat label="Sampling steps" value={item.settings.samplingSteps} />
+          {/* Post details — fully local, no Supabase writes */}
+          <section className="space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="flex items-center gap-2 text-sm font-semibold">
+                <Sparkles className="h-4 w-4 text-primary" /> Post details
+              </h3>
+              <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Stored on this device</span>
+            </div>
+
+            <div className="space-y-1.5">
+              <Label className="text-xs font-medium text-muted-foreground">Post Type</Label>
+              <div className="inline-flex rounded-lg border border-border bg-muted/20 p-1">
+                <button
+                  type="button"
+                  onClick={() => setDraftPostType("normal")}
+                  disabled={isScheduled}
+                  className={cn(
+                    "rounded-md px-4 py-1.5 text-sm font-medium transition-colors",
+                    draftPostType === "normal" ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+                    isScheduled && "cursor-not-allowed opacity-60",
+                  )}
+                >
+                  Normal Post
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDraftPostType("ppv")}
+                  disabled={isScheduled}
+                  className={cn(
+                    "rounded-md px-4 py-1.5 text-sm font-medium transition-colors",
+                    draftPostType === "ppv" ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+                    isScheduled && "cursor-not-allowed opacity-60",
+                  )}
+                >
+                  PPV Post
+                </button>
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-2 text-xs">
-              <Stat label="Generated" value={new Date(item.createdAt).toLocaleString()} />
-              <Stat label="Job ID" value={item.jobId.slice(0, 12)} mono />
-            </div>
-          </section>
 
-          {/* Scene prompts */}
-          <section className="space-y-2">
-            <h3 className="text-sm font-semibold">Scene prompts</h3>
-            <div className="space-y-2">
-              {item.scenes.map((s, i) => (
-                <div key={i} className="rounded-lg border border-border/60 bg-muted/40 p-2.5 text-xs">
-                  <span className="mr-2 inline-flex h-4 w-4 items-center justify-center rounded bg-primary/20 text-[10px] font-medium text-primary">{i + 1}</span>
-                  <span className="text-muted-foreground">{s}</span>
+            {draftPostType === "ppv" && (
+              <div className="space-y-1.5">
+                <Label className="text-xs font-medium text-muted-foreground">Price (USD)</Label>
+                <div className="flex flex-wrap items-center gap-2">
+                  {PPV_PRICE_PRESETS.map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      disabled={isScheduled}
+                      onClick={() => setDraftPrice(p)}
+                      className={cn(
+                        "rounded-full border px-3 py-1 text-xs font-medium transition-colors",
+                        draftPrice === p ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:border-primary/40",
+                        isScheduled && "cursor-not-allowed opacity-60",
+                      )}
+                    >
+                      ${p}
+                    </button>
+                  ))}
+                  <Input
+                    type="number"
+                    min={0}
+                    step="0.01"
+                    value={draftPrice}
+                    disabled={isScheduled}
+                    onChange={(e) => setDraftPrice(Math.max(0, Number(e.target.value) || 0))}
+                    className="w-28"
+                  />
                 </div>
-              ))}
+              </div>
+            )}
+
+            <div className="space-y-1.5">
+              <Label className="text-xs font-medium text-muted-foreground">Caption</Label>
+              <Textarea
+                rows={4}
+                value={draftCaption}
+                disabled={isScheduled}
+                onChange={(e) => setDraftCaption(e.target.value)}
+                placeholder="Write a caption for this post…"
+              />
+            </div>
+
+            <div className="flex justify-end">
+              <Button size="sm" onClick={onSavePostMeta} disabled={!isDirty || isScheduled}>
+                Save post details
+              </Button>
             </div>
           </section>
 
-          {/* Negative prompt */}
-          <section className="space-y-2">
-            <h3 className="text-sm font-semibold">Negative prompt</h3>
-            <p className="rounded-lg border border-border/60 bg-muted/40 p-2.5 text-xs text-muted-foreground">{item.negativePrompt}</p>
-          </section>
+          <Separator />
 
           {/* Reviewer notes */}
           <section className="space-y-2">
-            <h3 className="flex items-center gap-2 text-sm font-semibold">
-              <FileText className="h-4 w-4" /> Reviewer notes
-            </h3>
+            <h3 className="text-sm font-semibold">Reviewer notes</h3>
             <Textarea value={noteDraft} onChange={(e) => onNoteChange(e.target.value)}
               placeholder="e.g. Improve lighting, re-render scene 3…" rows={3} />
             <div className="flex justify-end">
@@ -957,15 +1100,6 @@ function DetailPanel({
           </section>
         </div>
       </ScrollArea>
-    </div>
-  );
-}
-
-function Stat({ label, value, mono }: { label: string; value: string | number; mono?: boolean }) {
-  return (
-    <div className="rounded-lg border border-border/60 bg-muted/40 p-2.5">
-      <p className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</p>
-      <p className={cn("mt-0.5 text-foreground", mono && "font-mono text-xs")}>{value}</p>
     </div>
   );
 }
