@@ -48,6 +48,30 @@ export const Route = createFileRoute("/_authenticated")({
   component: DashboardPage,
 });
 
+// ─── Post meta (caption / price / postType) ───────────────────────────────────
+// Set in Review page, stored client-side in localStorage under this exact key.
+// post_type / ppv_price are NOT columns in Supabase — they only ever lived in
+// localStorage, so querying them from `schedules`/`images`/`videos` throws and
+// silently empties the Publishing History panel. Read from localStorage instead,
+// exactly like schedule.tsx does.
+// ────────────────────────────────────────────────────────────────────────────
+type PostType = "normal" | "ppv";
+type PostMeta = { postType: PostType; price: number; caption: string };
+
+const POST_META_STORAGE_KEY = "lila_review_post_meta"; // MUST match review.tsx / schedule.tsx exactly
+
+function loadPostMetaMap(): Record<string, PostMeta> {
+  try {
+    const raw = localStorage.getItem(POST_META_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+
+function getPostMetaFor(contentId: string, fallbackCaption: string): PostMeta {
+  const map = loadPostMetaMap();
+  return map[contentId] ?? { postType: "normal", price: 0, caption: fallbackCaption };
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type ActivityKind =
@@ -75,8 +99,6 @@ interface UpcomingPost {
   scheduledAt: string;
   platform: string;
 }
-
-type PostType = "normal" | "ppv";
 
 interface PublishedPost {
   id: string;
@@ -224,7 +246,11 @@ async function fetchUpcoming(): Promise<UpcomingPost[]> {
     .order("publish_time", { ascending: true })
     .limit(5);
 
-  if (error || !rows?.length) return [];
+  if (error) {
+    console.error("[dashboard] fetchUpcoming error:", error);
+    return [];
+  }
+  if (!rows?.length) return [];
 
   const imgIds = rows.filter((r: any) => r.content_type === "image").map((r: any) => r.content_id);
   const vidIds = rows.filter((r: any) => r.content_type === "video").map((r: any) => r.content_id);
@@ -260,26 +286,36 @@ async function fetchUpcoming(): Promise<UpcomingPost[]> {
   });
 }
 
+// FIXED: removed `post_type, ppv_price` from every select below — those
+// columns don't exist on `schedules`/`images`/`videos` in Supabase (post type
+// & price are local-only, stored in the `lila_review_post_meta` localStorage
+// map by review.tsx). Selecting unknown columns makes Supabase return an
+// error, which this function used to swallow and just return `[]` — that's
+// why "Publishing history" looked empty. Now we fetch only real columns and
+// merge in postMeta from localStorage afterwards via getPostMetaFor().
 async function fetchPublishingHistory(): Promise<PublishedPost[]> {
-  // Fetch recent published + failed schedules
   const { data: rows, error } = await supabase
     .from("schedules")
-    .select("id, publish_time, content_type, platform, content_id, status, post_type, ppv_price")
+    .select("id, publish_time, content_type, platform, content_id, status")
     .in("status", ["published", "failed"])
     .order("publish_time", { ascending: false })
     .limit(10);
 
-  if (error || !rows?.length) return [];
+  if (error) {
+    console.error("[dashboard] fetchPublishingHistory error:", error);
+    return [];
+  }
+  if (!rows?.length) return [];
 
   const imgIds = rows.filter((r: any) => r.content_type === "image").map((r: any) => r.content_id);
   const vidIds = rows.filter((r: any) => r.content_type === "video").map((r: any) => r.content_id);
 
   const [imgR, vidR, charR] = await Promise.all([
     imgIds.length
-      ? supabase.from("images").select("id, image_url, prompt, character_id, published_at, external_post_id, post_type, ppv_price").in("id", imgIds)
+      ? supabase.from("images").select("id, image_url, prompt, character_id, published_at, external_post_id").in("id", imgIds)
       : Promise.resolve({ data: [] as any[] }),
     vidIds.length
-      ? supabase.from("videos").select("id, video_url, prompt, scene_prompts, character_id, published_at, external_post_id, post_type, ppv_price").in("id", vidIds)
+      ? supabase.from("videos").select("id, video_url, prompt, scene_prompts, character_id, published_at, external_post_id").in("id", vidIds)
       : Promise.resolve({ data: [] as any[] }),
     supabase.from("characters").select("id, name, reference_image_url"),
   ]);
@@ -296,9 +332,11 @@ async function fetchPublishingHistory(): Promise<PublishedPost[]> {
     const media = isVideo ? src?.video_url : src?.image_url;
     const thumb = char?.reference_image_url || media || PLACEHOLDER;
     const scenes = isVideo && Array.isArray(src?.scene_prompts) ? src.scene_prompts : src?.prompt ? [src.prompt] : [];
-    // post_type: prefer the content row value, fall back to schedule row
-    const postType: PostType = (src?.post_type ?? r.post_type ?? "normal") as PostType;
-    const ppvPrice = src?.ppv_price ?? r.ppv_price ?? undefined;
+
+    // Post type / price / caption — pulled from the SAME localStorage map
+    // review.tsx writes to, keyed by the images/videos row id (r.content_id).
+    const fallbackCaption = scenes[0] ?? src?.prompt ?? "Untitled";
+    const postMeta = getPostMetaFor(r.content_id, fallbackCaption);
 
     return {
       id:           r.id,
@@ -306,12 +344,12 @@ async function fetchPublishingHistory(): Promise<PublishedPost[]> {
       character:    char?.name ?? "Lila",
       thumbnail:    thumb,
       mediaUrl:     media ?? "",
-      postType,
-      ppvPrice:     ppvPrice ? Number(ppvPrice) : undefined,
+      postType:     postMeta.postType,
+      ppvPrice:     postMeta.postType === "ppv" ? postMeta.price : undefined,
       status:       r.status === "published" ? "published" : "failed",
       publishedAt:  src?.published_at ?? r.publish_time,
       externalPostId: src?.external_post_id ?? undefined,
-      contentName:  `${char?.name ?? "Lila"} — ${(scenes[0] ?? "Untitled").slice(0, 36)}`,
+      contentName:  `${char?.name ?? "Lila"} — ${(postMeta.caption || "Untitled").slice(0, 36)}`,
       platform:     r.platform ?? "Fanvue",
     };
   });
