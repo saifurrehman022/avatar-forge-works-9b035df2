@@ -15,7 +15,6 @@ import {
   AlertTriangle,
   Lock,
   Globe,
-  DollarSign,
   ExternalLink,
   Play,
 } from "lucide-react";
@@ -79,17 +78,19 @@ interface UpcomingPost {
 
 type PostType = "normal" | "ppv";
 
-interface PublishHistoryItem {
+interface PublishedPost {
   id: string;
   type: "image" | "video";
   character: string;
   thumbnail: string;
-  contentName: string;
+  mediaUrl: string;
   postType: PostType;
   ppvPrice?: number;
   status: "published" | "failed";
   publishedAt: string;
   externalPostId?: string;
+  contentName: string;
+  platform: string;
 }
 
 // ─── Data fetchers ────────────────────────────────────────────────────────────
@@ -259,12 +260,13 @@ async function fetchUpcoming(): Promise<UpcomingPost[]> {
   });
 }
 
-async function fetchPublishHistory(): Promise<PublishHistoryItem[]> {
+async function fetchPublishingHistory(): Promise<PublishedPost[]> {
+  // Fetch recent published + failed schedules
   const { data: rows, error } = await supabase
     .from("schedules")
-    .select("id, content_type, content_id, platform, status, post_type, ppv_price, created_at")
+    .select("id, publish_time, content_type, platform, content_id, status, post_type, ppv_price")
     .in("status", ["published", "failed"])
-    .order("created_at", { ascending: false })
+    .order("publish_time", { ascending: false })
     .limit(10);
 
   if (error || !rows?.length) return [];
@@ -274,10 +276,10 @@ async function fetchPublishHistory(): Promise<PublishHistoryItem[]> {
 
   const [imgR, vidR, charR] = await Promise.all([
     imgIds.length
-      ? supabase.from("images").select("id, image_url, character_id, prompt, published_at, external_post_id, post_type, ppv_price").in("id", imgIds)
+      ? supabase.from("images").select("id, image_url, prompt, character_id, published_at, external_post_id, post_type, ppv_price").in("id", imgIds)
       : Promise.resolve({ data: [] as any[] }),
     vidIds.length
-      ? supabase.from("videos").select("id, video_url, character_id, prompt, published_at, external_post_id, post_type, ppv_price").in("id", vidIds)
+      ? supabase.from("videos").select("id, video_url, prompt, scene_prompts, character_id, published_at, external_post_id, post_type, ppv_price").in("id", vidIds)
       : Promise.resolve({ data: [] as any[] }),
     supabase.from("characters").select("id, name, reference_image_url"),
   ]);
@@ -287,27 +289,30 @@ async function fetchPublishHistory(): Promise<PublishHistoryItem[]> {
   const charMap = new Map((charR.data ?? []).map((c: any) => [c.id, c]));
   const PLACEHOLDER = "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=400&q=80";
 
-  return rows.map((r: any): PublishHistoryItem => {
+  return rows.map((r: any): PublishedPost => {
     const isVideo = r.content_type === "video";
     const src: any = isVideo ? vidMap.get(r.content_id) : imgMap.get(r.content_id);
     const char: any = src?.character_id ? charMap.get(src.character_id) : null;
     const media = isVideo ? src?.video_url : src?.image_url;
     const thumb = char?.reference_image_url || media || PLACEHOLDER;
-    const postType: PostType = src?.post_type ?? r.post_type ?? "normal";
+    const scenes = isVideo && Array.isArray(src?.scene_prompts) ? src.scene_prompts : src?.prompt ? [src.prompt] : [];
+    // post_type: prefer the content row value, fall back to schedule row
+    const postType: PostType = (src?.post_type ?? r.post_type ?? "normal") as PostType;
     const ppvPrice = src?.ppv_price ?? r.ppv_price ?? undefined;
-    const prompt = src?.prompt ?? "";
 
     return {
-      id:            r.id,
-      type:          r.content_type,
-      character:     char?.name ?? "Lila",
-      thumbnail:     thumb,
-      contentName:   `${char?.name ?? "Lila"} — ${(prompt || "Untitled").slice(0, 36)}`,
+      id:           r.id,
+      type:         r.content_type,
+      character:    char?.name ?? "Lila",
+      thumbnail:    thumb,
+      mediaUrl:     media ?? "",
       postType,
-      ppvPrice:      postType === "ppv" ? ppvPrice : undefined,
-      status:        r.status === "published" ? "published" : "failed",
-      publishedAt:   src?.published_at ?? r.created_at,
+      ppvPrice:     ppvPrice ? Number(ppvPrice) : undefined,
+      status:       r.status === "published" ? "published" : "failed",
+      publishedAt:  src?.published_at ?? r.publish_time,
       externalPostId: src?.external_post_id ?? undefined,
+      contentName:  `${char?.name ?? "Lila"} — ${(scenes[0] ?? "Untitled").slice(0, 36)}`,
+      platform:     r.platform ?? "Fanvue",
     };
   });
 }
@@ -336,7 +341,8 @@ function formatScheduleTime(iso: string) {
 
 function fmtDT(iso: string) {
   const d = new Date(iso);
-  return d.toLocaleDateString([], { month: "short", day: "numeric" }) + " · " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleDateString([], { month: "short", day: "numeric" }) + " · " +
+         d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 function getGreeting() {
@@ -375,8 +381,8 @@ function DashboardPage() {
     staleTime: 20_000,
   });
   const { data: publishHistory = [], isLoading: historyLoading } = useQuery({
-    queryKey: ["dashboard", "publish-history"],
-    queryFn:  fetchPublishHistory,
+    queryKey: ["dashboard", "publishing-history"],
+    queryFn:  fetchPublishingHistory,
     staleTime: 30_000,
   });
 
@@ -438,9 +444,9 @@ function DashboardPage() {
                   </div>
                 </div>
 
-                {/* Publishing History */}
+                {/* Publishing History — full width below */}
                 <div className="mt-4">
-                  <PublishHistoryPanel items={publishHistory} isLoading={historyLoading} />
+                  <PublishingHistoryPanel items={publishHistory} isLoading={historyLoading} />
                 </div>
 
               </div>
@@ -544,8 +550,6 @@ function QuickActionsPanel({ pending }: { pending: number }) {
   );
 }
 
-// ─── Schedule Panel ───────────────────────────────────────────────────────────
-
 function SchedulePanel({ items, isLoading }: { items: UpcomingPost[]; isLoading: boolean }) {
   return (
     <div className="rounded-xl border border-border/60 bg-card">
@@ -605,13 +609,13 @@ function SchedulePanel({ items, isLoading }: { items: UpcomingPost[]; isLoading:
 
 // ─── Publishing History Panel ─────────────────────────────────────────────────
 
-function PublishHistoryPanel({ items, isLoading }: { items: PublishHistoryItem[]; isLoading: boolean }) {
+function PublishingHistoryPanel({ items, isLoading }: { items: PublishedPost[]; isLoading: boolean }) {
   return (
     <div className="rounded-xl border border-border/60 bg-card">
       <div className="flex items-center justify-between border-b border-border/60 px-5 py-4">
         <div>
           <p className="text-sm font-semibold">Publishing history</p>
-          <p className="text-xs text-muted-foreground">Recent posts sent to Fanvue</p>
+          <p className="text-xs text-muted-foreground">Recent published &amp; failed posts</p>
         </div>
         <Button asChild variant="ghost" size="sm" className="gap-1 text-xs text-muted-foreground">
           <Link to="/schedule">View all <ArrowRight className="h-3 w-3" /></Link>
@@ -621,22 +625,19 @@ function PublishHistoryPanel({ items, isLoading }: { items: PublishHistoryItem[]
       {isLoading ? (
         <div className="divide-y divide-border/40">
           {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="flex items-center gap-4 px-5 py-3.5">
-              <div className="h-10 w-14 animate-pulse rounded-md bg-muted shrink-0" />
+            <div key={i} className="flex items-center gap-3 px-5 py-3">
+              <div className="h-10 w-14 animate-pulse rounded bg-muted" />
               <div className="flex-1 space-y-1.5">
                 <div className="h-3 w-40 animate-pulse rounded bg-muted" />
                 <div className="h-2.5 w-24 animate-pulse rounded bg-muted" />
               </div>
-              <div className="h-5 w-16 animate-pulse rounded bg-muted" />
-              <div className="h-5 w-12 animate-pulse rounded bg-muted" />
-              <div className="h-5 w-20 animate-pulse rounded bg-muted" />
             </div>
           ))}
         </div>
       ) : items.length === 0 ? (
         <div className="px-5 py-10 text-center">
-          <p className="text-sm text-muted-foreground">No publishing history yet.</p>
-          <p className="mt-1 text-xs text-muted-foreground">Posts published to Fanvue will appear here.</p>
+          <p className="text-sm text-muted-foreground">No published posts yet.</p>
+          <p className="mt-1 text-xs text-muted-foreground">Posts you publish via Scheduling will appear here.</p>
         </div>
       ) : (
         <>
@@ -645,96 +646,84 @@ function PublishHistoryPanel({ items, isLoading }: { items: PublishHistoryItem[]
             <div className="col-span-4">Content</div>
             <div className="col-span-2">Type</div>
             <div className="col-span-2">PPV Price</div>
-            <div className="col-span-2">Published time</div>
-            <div className="col-span-1">Post ID</div>
-            <div className="col-span-1 text-right">Status</div>
+            <div className="col-span-2">Status</div>
+            <div className="col-span-2">Published</div>
           </div>
-
-          {/* Rows */}
           <div className="divide-y divide-border/40">
-            {items.map((item) => (
-              <Link
-                key={item.id}
-                to="/schedule"
-                className="grid grid-cols-12 items-center gap-3 px-5 py-3 hover:bg-muted/30 transition-colors"
-              >
+            {items.map((post) => (
+              <div key={post.id} className="grid grid-cols-12 items-center gap-3 px-5 py-3 hover:bg-muted/30 transition-colors">
                 {/* Content */}
-                <div className="col-span-4 flex items-center gap-3">
+                <div className="col-span-4 flex items-center gap-3 min-w-0">
                   <div className="relative h-10 w-14 shrink-0 overflow-hidden rounded-md border border-border/60 bg-muted">
-                    <img src={item.thumbnail} alt={item.character} className="h-full w-full object-cover" loading="lazy" />
-                    {item.type === "video" && (
+                    <img src={post.thumbnail} alt={post.character} className="h-full w-full object-cover" loading="lazy" />
+                    {post.type === "video" && (
                       <div className="absolute inset-0 grid place-items-center bg-black/30">
                         <Play className="h-3 w-3 text-white" />
                       </div>
                     )}
                     <div className="absolute right-0 bottom-0 grid h-3.5 w-3.5 place-items-center rounded-tl bg-background/80">
-                      {item.type === "video"
+                      {post.type === "video"
                         ? <Video className="h-2 w-2 text-primary" />
                         : <ImageLucide className="h-2 w-2 text-chart-2" />}
                     </div>
                   </div>
                   <div className="min-w-0">
-                    <p className="truncate text-sm font-medium text-foreground">{item.contentName}</p>
-                    <p className="text-xs text-muted-foreground">{item.character}</p>
+                    <p className="truncate text-sm font-medium text-foreground">{post.contentName}</p>
+                    <p className="truncate text-xs text-muted-foreground">{post.character} · {post.platform}</p>
+                    {post.externalPostId && (
+                      <a
+                        href={`https://www.fanvue.com/post/${post.externalPostId}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-0.5 font-mono text-[10px] text-primary hover:underline"
+                        onClick={e => e.stopPropagation()}
+                      >
+                        {post.externalPostId.slice(0, 10)}… <ExternalLink className="h-2.5 w-2.5" />
+                      </a>
+                    )}
                   </div>
                 </div>
 
-                {/* Post type */}
+                {/* Type */}
                 <div className="col-span-2">
-                  {item.postType === "ppv" ? (
-                    <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-amber-500">
+                  {post.postType === "ppv" ? (
+                    <span className="inline-flex items-center gap-1 rounded-md border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-amber-400">
                       <Lock className="h-2.5 w-2.5" /> PPV
                     </span>
                   ) : (
                     <span className="inline-flex items-center gap-1 rounded-md border border-border bg-muted px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                      <Globe className="h-2.5 w-2.5" /> Normal
+                      <Globe className="h-2.5 w-2.5" /> Free
                     </span>
                   )}
                 </div>
 
-                {/* PPV price */}
+                {/* PPV Price */}
                 <div className="col-span-2">
-                  {item.postType === "ppv" && item.ppvPrice != null ? (
-                    <span className="inline-flex items-center gap-0.5 text-sm font-semibold text-amber-500">
-                      <DollarSign className="h-3.5 w-3.5" />{item.ppvPrice}
-                    </span>
+                  {post.postType === "ppv" && post.ppvPrice ? (
+                    <span className="text-sm font-semibold text-amber-400">${post.ppvPrice}</span>
                   ) : (
                     <span className="text-sm text-muted-foreground">—</span>
                   )}
                 </div>
 
-                {/* Published time */}
-                <div className="col-span-2 text-xs text-muted-foreground">
-                  {fmtDT(item.publishedAt)}
-                </div>
-
-                {/* Post ID */}
-                <div className="col-span-1">
-                  {item.externalPostId ? (
-                    <span
-                      onClick={e => { e.preventDefault(); e.stopPropagation(); window.open(`https://www.fanvue.com/post/${item.externalPostId}`, "_blank"); }}
-                      className="inline-flex items-center gap-1 font-mono text-[10px] text-primary hover:underline cursor-pointer"
-                    >
-                      {item.externalPostId.slice(0, 6)}… <ExternalLink className="h-2.5 w-2.5 shrink-0" />
-                    </span>
-                  ) : (
-                    <span className="font-mono text-[11px] text-muted-foreground">—</span>
-                  )}
-                </div>
-
                 {/* Status */}
-                <div className="col-span-1 flex justify-end">
-                  {item.status === "published" ? (
+                <div className="col-span-2">
+                  {post.status === "published" ? (
                     <span className="inline-flex items-center gap-1 rounded-md border border-success/30 bg-success/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-success">
-                      <CheckCircle2 className="h-2.5 w-2.5" /> Live
+                      <CheckCircle2 className="h-2.5 w-2.5" /> Published
                     </span>
                   ) : (
                     <span className="inline-flex items-center gap-1 rounded-md border border-destructive/30 bg-destructive/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-destructive">
-                      <XCircle className="h-2.5 w-2.5" /> Failed
+                      <AlertTriangle className="h-2.5 w-2.5" /> Failed
                     </span>
                   )}
                 </div>
-              </Link>
+
+                {/* Published Time */}
+                <div className="col-span-2 text-xs text-muted-foreground">
+                  {post.publishedAt ? fmtDT(post.publishedAt) : "—"}
+                </div>
+              </div>
             ))}
           </div>
         </>
