@@ -40,7 +40,26 @@ const FANVUE_REDIRECT_URI  = "https://www.madamlila.com/schedule";
 const FANVUE_AUTH_URL      = "https://auth.fanvue.com/oauth2/auth";
 const FANVUE_API_BASE      = "https://api.fanvue.com";
 const FANVUE_API_VERSION   = "2025-06-26";
+// ─────────────────────────────────────────────────────────────────────────────
+// Post meta (caption / price / postType) — set in Review page, stored
+// client-side in localStorage under this exact key so both pages agree.
+// ─────────────────────────────────────────────────────────────────────────────
+type PostType = "normal" | "ppv";
+type PostMeta = { postType: PostType; price: number; caption: string };
 
+const POST_META_STORAGE_KEY = "lila_review_post_meta"; // MUST match review.tsx exactly
+
+function loadPostMetaMap(): Record<string, PostMeta> {
+  try {
+    const raw = localStorage.getItem(POST_META_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+
+function getPostMetaFor(contentId: string, fallbackCaption: string): PostMeta {
+  const map = loadPostMetaMap();
+  return map[contentId] ?? { postType: "normal", price: 0, caption: fallbackCaption };
+}
 // ─────────────────────────────────────────────────────────────────────────────
 // Debug logger
 // ─────────────────────────────────────────────────────────────────────────────
@@ -437,12 +456,13 @@ type QueueStatus   = "waiting" | "ready" | "publishing" | "published" | "failed"
 type ContentType   = "image" | "video";
 type HistoryEvent  = { at: string; label: string; kind: "scheduled"|"publishing"|"published"|"failed"|"retried" };
 type ScheduledItem = {
-  id: string; contentName: string; type: ContentType; character: string;
+  id: string; contentId: string; contentName: string; type: ContentType; character: string; // ADD contentId
   thumbnail: string; mediaUrl: string; scheduledAt: string;
   status: PublishStatus; queueStatus: QueueStatus; autoPublish: boolean;
   externalPostId?: string; publishedAt?: string;
   settings: { fps: number; framesPerScene: number; numScenes: number; samplingSteps: number };
   scenePrompts: string[]; negativePrompt: string; history: HistoryEvent[];
+  postMeta: PostMeta; // NEW — the source of truth for what actually gets posted
 };
 
 const EMPTY: ScheduledItem[] = [];
@@ -469,12 +489,20 @@ async function fetchSchedules(): Promise<ScheduledItem[]> {
     const src:any = isVideo ? vidMap.get(r.content_id) : imgMap.get(r.content_id);
     const char:any= src?.character_id ? charMap.get(src.character_id) : null;
     const scenes  = isVideo && Array.isArray(src?.scene_prompts) ? src.scene_prompts : src?.prompt ? [src.prompt] : [];
+    //const media   = isVideo ? src?.video_url : src?.image_url;
+    //const thumb   = char?.reference_image_url || media || PLACEHOLDER;
     const media   = isVideo ? src?.video_url : src?.image_url;
     const thumb   = char?.reference_image_url || media || PLACEHOLDER;
+
+    // NEW — pull caption/price/postType from the SAME localStorage map review.tsx writes to.
+    // r.content_id is the images/videos row id — exactly what review.tsx keys on.
+    const fallbackCaption = scenes[0] ?? src?.prompt ?? "Untitled";
+    const postMeta = getPostMetaFor(r.content_id, fallbackCaption);
     const status: PublishStatus = r.status==="published"?"published":r.status==="failed"?"failed":r.status==="publishing"?"publishing":"scheduled";
     const queueStatus: QueueStatus = status==="published"?"published":status==="failed"?"failed":status==="publishing"?"publishing":new Date(r.publish_time)<=new Date()?"ready":"waiting";
     return {
       id: r.id,
+      contentId: r.content_id,          // NEW
       contentName: `${char?.name??"Lila"} — ${(scenes[0]??"Untitled").slice(0,40)}`,
       type: r.content_type, character: char?.name??"Lila",
       thumbnail: thumb, mediaUrl: media||"",
@@ -483,11 +511,12 @@ async function fetchSchedules(): Promise<ScheduledItem[]> {
       publishedAt: src?.published_at??undefined,
       settings: { fps:16, framesPerScene:257, numScenes:scenes.length||1, samplingSteps:29 },
       scenePrompts: scenes, negativePrompt: "low quality, blurry, distorted face, watermark",
+      postMeta,                          // NEW
       history: [
-        { at: r.created_at, label: `Scheduled for ${new Date(r.publish_time).toLocaleString()}`, kind: "scheduled" },
-        ...(src?.published_at?[{at:src.published_at,label:"Published",kind:"published" as const}]:[]),
-      ],
-    };
+          { at: r.created_at, label: `Scheduled for ${new Date(r.publish_time).toLocaleString()}`, kind: "scheduled" },
+          ...(src?.published_at?[{at:src.published_at,label:"Published",kind:"published" as const}]:[]),
+  ],
+};
   });
 }
 
@@ -766,7 +795,9 @@ function SchedulePage() {
     const tid=`pub-${id}`;
     toast.loading("Starting Fanvue publish…",{id:tid,duration:Infinity});
     try{
-      const caption=item.scenePrompts[0]??item.contentName;
+      //const caption=item.scenePrompts[0]??item.contentName;
+      const freshMeta = getPostMetaFor(item.contentId, item.scenePrompts[0] ?? item.contentName);
+      const caption = freshMeta.caption || item.scenePrompts[0] || item.contentName;
       const postUuid=await publishToFanvue({
         token, mediaUrl:item.mediaUrl, mediaType:item.type, caption,
         onProgress:s=>toast.loading(s,{id:tid,duration:Infinity}),
