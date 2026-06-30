@@ -1,3 +1,4 @@
+```tsx
 import { Link, useRouterState } from "@tanstack/react-router";
 import {
   LayoutDashboard,
@@ -6,7 +7,6 @@ import {
   ClipboardCheck,
   CalendarClock,
   UserCircle2,
-  
 } from "lucide-react";
 
 import {
@@ -32,12 +32,11 @@ const nav = [
   { title: "Character Manager", url: "/characters", icon: UserCircle2 },
 ];
 
-const footerNav = [{ title: "Settings", url: "/settings", icon: Settings }];
-
 export function AppSidebar() {
   const { state } = useSidebar();
   const collapsed = state === "collapsed";
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+
   const isActive = (url: string) =>
     url === "/" ? pathname === "/" : pathname.startsWith(url);
 
@@ -50,6 +49,7 @@ export function AppSidebar() {
               L
             </span>
           </div>
+
           {!collapsed && (
             <div className="flex flex-col leading-tight">
               <span className="font-display text-sm font-semibold tracking-tight">
@@ -66,6 +66,7 @@ export function AppSidebar() {
       <SidebarContent>
         <SidebarGroup>
           <SidebarGroupLabel>Workspace</SidebarGroupLabel>
+
           <SidebarGroupContent>
             <SidebarMenu>
               {nav.map((item) => (
@@ -78,6 +79,7 @@ export function AppSidebar() {
                     <Link to={item.url}>
                       <item.icon className="h-4 w-4" />
                       <span>{item.title}</span>
+
                       {!collapsed && item.badge ? (
                         <span className="ml-auto rounded-full bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary">
                           {item.badge}
@@ -93,22 +95,6 @@ export function AppSidebar() {
       </SidebarContent>
 
       <SidebarFooter className="border-t border-sidebar-border">
-        <SidebarMenu>
-          {footerNav.map((item) => (
-            <SidebarMenuItem key={item.title}>
-              <SidebarMenuButton
-                asChild
-                isActive={isActive(item.url)}
-                tooltip={item.title}
-              >
-                <Link to={item.url}>
-                  <item.icon className="h-4 w-4" />
-                  <span>{item.title}</span>
-                </Link>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          ))}
-        </SidebarMenu>
         {!collapsed && (
           <div className="mx-2 mb-2 mt-1 rounded-lg border border-sidebar-border bg-sidebar-accent/40 p-3">
             <p className="text-[11px] font-medium text-foreground">
@@ -123,3 +109,4 @@ export function AppSidebar() {
     </Sidebar>
   );
 }
+```
