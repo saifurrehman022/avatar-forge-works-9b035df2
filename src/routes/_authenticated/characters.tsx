@@ -544,6 +544,7 @@ const MAX_VIDEO_SCENES = 10;
 
 type VideoSceneEntry = { id: string; title: string; prompt: string };
 
+
 const DEFAULT_VIDEO_SCENES: VideoSceneEntry[] = [
   { id: "v1",  title: "Scene 1 — Wake",        prompt: " Medium-wide cinematic shot of Lila Valentina Rossi completely nude under large rain showerhead, water cascading sensually over her voluptuous tanned body with long wavy dark hair, seductive smile looking at camera, golden hour light from window " },
   { id: "v2",  title: "Scene 2 — Kitchen",     prompt: " Close-up shot as she slowly caresses and squeezes her large full breasts, water droplets running down her hard nipples, sensual expression on her face  " },
@@ -690,6 +691,7 @@ function VideoSceneTemplateLibrary() {
 }
 
 
+type PresetRow = {
   id: string; key: string; label: string;
   prompt_style: string | null; caption_style: string | null; negative_prompt: string | null;
 };
