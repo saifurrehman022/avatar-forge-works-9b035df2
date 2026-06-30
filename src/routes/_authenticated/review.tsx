@@ -866,7 +866,13 @@ function QueueCard({
         </div>
 
         {item.type === "video" && (
-          
+      <div className="absolute inset-0 grid place-items-center opacity-0 transition-opacity group-hover:opacity-100">
+            <div className="grid h-12 w-12 place-items-center rounded-full bg-background/80 backdrop-blur">
+              <Play className="h-5 w-5 translate-x-[1px] text-foreground" />
+            </div>
+          </div>
+
+      
         )}
 
         <div className="absolute inset-x-0 bottom-0 p-3">
