@@ -27,7 +27,7 @@ const nav = [
   { title: "Dashboard", url: "/", icon: LayoutDashboard },
   { title: "Content Generation", url: "/generate", icon: Sparkles },
   { title: "Content Library", url: "/library", icon: Library },
-  { title: "Review Queue", url: "/review", icon: ClipboardCheck, badge: 12 },
+  { title: "Review Queue", url: "/review", icon: ClipboardCheck},
   { title: "Scheduling", url: "/schedule", icon: CalendarClock },
   { title: "Character Manager", url: "/characters", icon: UserCircle2 },
 ];
