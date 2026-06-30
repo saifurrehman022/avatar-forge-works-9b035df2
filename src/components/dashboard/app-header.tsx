@@ -43,15 +43,7 @@ export function AppHeader() {
       <div className="ml-auto flex items-center gap-1">
         <ThemeToggle />
 
-        <Button
-          variant="ghost"
-          size="icon"
-          className="relative h-9 w-9"
-          aria-label="Notifications"
-        >
-          <Bell className="h-4 w-4" />
-          <span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-primary shadow-[0_0_8px_var(--primary)]" />
-        </Button>
+       
 
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
