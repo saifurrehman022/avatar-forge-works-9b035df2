@@ -1,6 +1,3 @@
-
-
-
 import { createFileRoute, Link } from "@tanstack/react-router";
 import {
   ImageIcon,
@@ -16,6 +13,11 @@ import {
   XCircle,
   Clock,
   AlertTriangle,
+  Lock,
+  Globe,
+  DollarSign,
+  ExternalLink,
+  Play,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 
@@ -75,6 +77,21 @@ interface UpcomingPost {
   platform: string;
 }
 
+type PostType = "normal" | "ppv";
+
+interface PublishHistoryItem {
+  id: string;
+  type: "image" | "video";
+  character: string;
+  thumbnail: string;
+  contentName: string;
+  postType: PostType;
+  ppvPrice?: number;
+  status: "published" | "failed";
+  publishedAt: string;
+  externalPostId?: string;
+}
+
 // ─── Data fetchers ────────────────────────────────────────────────────────────
 
 async function fetchDashboardStats() {
@@ -91,10 +108,6 @@ async function fetchDashboardStats() {
       .in("status", ["queued", "processing"]),
   ]);
 
-  // ── FIX: count pending reviews the same way review.tsx does it ──
-  // review.tsx shows ALL images + videos that aren't approved/rejected/scheduled/published.
-  // Items may not have a review_queue row yet (rows are created lazily on first action).
-  // So we count images and videos where status is not one of the "done" statuses.
   const [pendingImgs, pendingVids] = await Promise.all([
     supabase
       .from("images")
@@ -246,6 +259,59 @@ async function fetchUpcoming(): Promise<UpcomingPost[]> {
   });
 }
 
+async function fetchPublishHistory(): Promise<PublishHistoryItem[]> {
+  const { data: rows, error } = await supabase
+    .from("schedules")
+    .select("id, content_type, content_id, platform, status, post_type, ppv_price, created_at")
+    .in("status", ["published", "failed"])
+    .order("created_at", { ascending: false })
+    .limit(10);
+
+  if (error || !rows?.length) return [];
+
+  const imgIds = rows.filter((r: any) => r.content_type === "image").map((r: any) => r.content_id);
+  const vidIds = rows.filter((r: any) => r.content_type === "video").map((r: any) => r.content_id);
+
+  const [imgR, vidR, charR] = await Promise.all([
+    imgIds.length
+      ? supabase.from("images").select("id, image_url, character_id, prompt, published_at, external_post_id, post_type, ppv_price").in("id", imgIds)
+      : Promise.resolve({ data: [] as any[] }),
+    vidIds.length
+      ? supabase.from("videos").select("id, video_url, character_id, prompt, published_at, external_post_id, post_type, ppv_price").in("id", vidIds)
+      : Promise.resolve({ data: [] as any[] }),
+    supabase.from("characters").select("id, name, reference_image_url"),
+  ]);
+
+  const imgMap  = new Map((imgR.data  ?? []).map((i: any) => [i.id, i]));
+  const vidMap  = new Map((vidR.data  ?? []).map((v: any) => [v.id, v]));
+  const charMap = new Map((charR.data ?? []).map((c: any) => [c.id, c]));
+  const PLACEHOLDER = "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=400&q=80";
+
+  return rows.map((r: any): PublishHistoryItem => {
+    const isVideo = r.content_type === "video";
+    const src: any = isVideo ? vidMap.get(r.content_id) : imgMap.get(r.content_id);
+    const char: any = src?.character_id ? charMap.get(src.character_id) : null;
+    const media = isVideo ? src?.video_url : src?.image_url;
+    const thumb = char?.reference_image_url || media || PLACEHOLDER;
+    const postType: PostType = src?.post_type ?? r.post_type ?? "normal";
+    const ppvPrice = src?.ppv_price ?? r.ppv_price ?? undefined;
+    const prompt = src?.prompt ?? "";
+
+    return {
+      id:            r.id,
+      type:          r.content_type,
+      character:     char?.name ?? "Lila",
+      thumbnail:     thumb,
+      contentName:   `${char?.name ?? "Lila"} — ${(prompt || "Untitled").slice(0, 36)}`,
+      postType,
+      ppvPrice:      postType === "ppv" ? ppvPrice : undefined,
+      status:        r.status === "published" ? "published" : "failed",
+      publishedAt:   src?.published_at ?? r.created_at,
+      externalPostId: src?.external_post_id ?? undefined,
+    };
+  });
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function timeAgo(iso: string) {
@@ -266,6 +332,11 @@ function formatScheduleTime(iso: string) {
   if (isToday)    return `Today · ${time}`;
   if (isTomorrow) return `Tomorrow · ${time}`;
   return d.toLocaleDateString([], { month: "short", day: "numeric" }) + ` · ${time}`;
+}
+
+function fmtDT(iso: string) {
+  const d = new Date(iso);
+  return d.toLocaleDateString([], { month: "short", day: "numeric" }) + " · " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 function getGreeting() {
@@ -302,6 +373,11 @@ function DashboardPage() {
     queryKey: ["dashboard", "upcoming"],
     queryFn:  fetchUpcoming,
     staleTime: 20_000,
+  });
+  const { data: publishHistory = [], isLoading: historyLoading } = useQuery({
+    queryKey: ["dashboard", "publish-history"],
+    queryFn:  fetchPublishHistory,
+    staleTime: 30_000,
   });
 
   const stats = data ?? { images: 0, videos: 0, scheduled: 0, pending: 0, active: 0 };
@@ -346,7 +422,6 @@ function DashboardPage() {
                     hint="awaiting approval"
                     icon={ClipboardCheck}
                     accent="chart-3"
-                    // Subtle pulse on the card when there are pending items
                     delta={stats.pending > 0 ? stats.pending : undefined}
                   />
                   <DashboardCard label="Active jobs"      value={String(stats.active)}    hint="queued or processing"  icon={Cpu}           accent="chart-5" />
@@ -361,6 +436,11 @@ function DashboardPage() {
                     <QuickActionsPanel pending={stats.pending} />
                     <SchedulePanel items={upcoming} isLoading={upcomingLoading} />
                   </div>
+                </div>
+
+                {/* Publishing History */}
+                <div className="mt-4">
+                  <PublishHistoryPanel items={publishHistory} isLoading={historyLoading} />
                 </div>
 
               </div>
@@ -463,6 +543,9 @@ function QuickActionsPanel({ pending }: { pending: number }) {
     </div>
   );
 }
+
+// ─── Schedule Panel ───────────────────────────────────────────────────────────
+
 function SchedulePanel({ items, isLoading }: { items: UpcomingPost[]; isLoading: boolean }) {
   return (
     <div className="rounded-xl border border-border/60 bg-card">
@@ -520,5 +603,142 @@ function SchedulePanel({ items, isLoading }: { items: UpcomingPost[]; isLoading:
   );
 }
 
-// ─── Schedule Panel ───────────────────────────────────────────────────────────
+// ─── Publishing History Panel ─────────────────────────────────────────────────
 
+function PublishHistoryPanel({ items, isLoading }: { items: PublishHistoryItem[]; isLoading: boolean }) {
+  return (
+    <div className="rounded-xl border border-border/60 bg-card">
+      <div className="flex items-center justify-between border-b border-border/60 px-5 py-4">
+        <div>
+          <p className="text-sm font-semibold">Publishing history</p>
+          <p className="text-xs text-muted-foreground">Recent posts sent to Fanvue</p>
+        </div>
+        <Button asChild variant="ghost" size="sm" className="gap-1 text-xs text-muted-foreground">
+          <Link to="/schedule">View all <ArrowRight className="h-3 w-3" /></Link>
+        </Button>
+      </div>
+
+      {isLoading ? (
+        <div className="divide-y divide-border/40">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="flex items-center gap-4 px-5 py-3.5">
+              <div className="h-10 w-14 animate-pulse rounded-md bg-muted shrink-0" />
+              <div className="flex-1 space-y-1.5">
+                <div className="h-3 w-40 animate-pulse rounded bg-muted" />
+                <div className="h-2.5 w-24 animate-pulse rounded bg-muted" />
+              </div>
+              <div className="h-5 w-16 animate-pulse rounded bg-muted" />
+              <div className="h-5 w-12 animate-pulse rounded bg-muted" />
+              <div className="h-5 w-20 animate-pulse rounded bg-muted" />
+            </div>
+          ))}
+        </div>
+      ) : items.length === 0 ? (
+        <div className="px-5 py-10 text-center">
+          <p className="text-sm text-muted-foreground">No publishing history yet.</p>
+          <p className="mt-1 text-xs text-muted-foreground">Posts published to Fanvue will appear here.</p>
+        </div>
+      ) : (
+        <>
+          {/* Table header */}
+          <div className="grid grid-cols-12 gap-3 border-b border-border/40 px-5 py-2.5 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+            <div className="col-span-4">Content</div>
+            <div className="col-span-2">Type</div>
+            <div className="col-span-2">PPV Price</div>
+            <div className="col-span-2">Published time</div>
+            <div className="col-span-1">Post ID</div>
+            <div className="col-span-1 text-right">Status</div>
+          </div>
+
+          {/* Rows */}
+          <div className="divide-y divide-border/40">
+            {items.map((item) => (
+              <Link
+                key={item.id}
+                to="/schedule"
+                className="grid grid-cols-12 items-center gap-3 px-5 py-3 hover:bg-muted/30 transition-colors"
+              >
+                {/* Content */}
+                <div className="col-span-4 flex items-center gap-3">
+                  <div className="relative h-10 w-14 shrink-0 overflow-hidden rounded-md border border-border/60 bg-muted">
+                    <img src={item.thumbnail} alt={item.character} className="h-full w-full object-cover" loading="lazy" />
+                    {item.type === "video" && (
+                      <div className="absolute inset-0 grid place-items-center bg-black/30">
+                        <Play className="h-3 w-3 text-white" />
+                      </div>
+                    )}
+                    <div className="absolute right-0 bottom-0 grid h-3.5 w-3.5 place-items-center rounded-tl bg-background/80">
+                      {item.type === "video"
+                        ? <Video className="h-2 w-2 text-primary" />
+                        : <ImageLucide className="h-2 w-2 text-chart-2" />}
+                    </div>
+                  </div>
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium text-foreground">{item.contentName}</p>
+                    <p className="text-xs text-muted-foreground">{item.character}</p>
+                  </div>
+                </div>
+
+                {/* Post type */}
+                <div className="col-span-2">
+                  {item.postType === "ppv" ? (
+                    <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-amber-500">
+                      <Lock className="h-2.5 w-2.5" /> PPV
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 rounded-md border border-border bg-muted px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                      <Globe className="h-2.5 w-2.5" /> Normal
+                    </span>
+                  )}
+                </div>
+
+                {/* PPV price */}
+                <div className="col-span-2">
+                  {item.postType === "ppv" && item.ppvPrice != null ? (
+                    <span className="inline-flex items-center gap-0.5 text-sm font-semibold text-amber-500">
+                      <DollarSign className="h-3.5 w-3.5" />{item.ppvPrice}
+                    </span>
+                  ) : (
+                    <span className="text-sm text-muted-foreground">—</span>
+                  )}
+                </div>
+
+                {/* Published time */}
+                <div className="col-span-2 text-xs text-muted-foreground">
+                  {fmtDT(item.publishedAt)}
+                </div>
+
+                {/* Post ID */}
+                <div className="col-span-1">
+                  {item.externalPostId ? (
+                    <span
+                      onClick={e => { e.preventDefault(); e.stopPropagation(); window.open(`https://www.fanvue.com/post/${item.externalPostId}`, "_blank"); }}
+                      className="inline-flex items-center gap-1 font-mono text-[10px] text-primary hover:underline cursor-pointer"
+                    >
+                      {item.externalPostId.slice(0, 6)}… <ExternalLink className="h-2.5 w-2.5 shrink-0" />
+                    </span>
+                  ) : (
+                    <span className="font-mono text-[11px] text-muted-foreground">—</span>
+                  )}
+                </div>
+
+                {/* Status */}
+                <div className="col-span-1 flex justify-end">
+                  {item.status === "published" ? (
+                    <span className="inline-flex items-center gap-1 rounded-md border border-success/30 bg-success/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-success">
+                      <CheckCircle2 className="h-2.5 w-2.5" /> Live
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 rounded-md border border-destructive/30 bg-destructive/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-destructive">
+                      <XCircle className="h-2.5 w-2.5" /> Failed
+                    </span>
+                  )}
+                </div>
+              </Link>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
