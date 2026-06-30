@@ -6,6 +6,7 @@ import {
   ClipboardCheck,
   CalendarClock,
   UserCircle2,
+  Settings,
 } from "lucide-react";
 
 import {
@@ -30,7 +31,6 @@ const nav = [
   { title: "Scheduling", url: "/schedule", icon: CalendarClock },
   { title: "Character Manager", url: "/characters", icon: UserCircle2 },
 ];
-
 
 
 export function AppSidebar() {
