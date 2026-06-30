@@ -20,7 +20,6 @@ import {
   Hash,
   Wand2,
   BookOpen,
-  Dog,
   Building2,
   Briefcase,
   Sofa,
@@ -251,22 +250,21 @@ function CharactersPage() {
             <TabsList className="bg-card/60">
               <TabsTrigger value="scenes">Scene Library</TabsTrigger>
               <TabsTrigger value="prompts">Prompt Templates</TabsTrigger>
+              <TabsTrigger value="video10">10-Scene Video</TabsTrigger>
               <TabsTrigger value="presets">Intensity Presets</TabsTrigger>
               <TabsTrigger value="defaults">Generation Defaults</TabsTrigger>
             </TabsList>
 
             <TabsContent value="scenes" className="mt-6"><SceneLibrary scenes={scenes} /></TabsContent>
             <TabsContent value="prompts" className="mt-6"><PromptLibrary prompts={prompts} /></TabsContent>
+            <TabsContent value="video10" className="mt-6"><VideoSceneTemplateLibrary /></TabsContent>
             <TabsContent value="presets" className="mt-6"><PresetLibrary presets={presets} /></TabsContent>
             <TabsContent value="defaults" className="mt-6">
               <DefaultsPanel defaults={defaults} setDefaults={setDefaults} />
             </TabsContent>
           </Tabs>
 
-          <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1fr_1fr]">
-            <ReviewCaptionsSection />
-            <MemorySection memory={memory} setMemory={setMemory} />
-          </div>
+          <ReviewCaptionsSection />
         </main>
       </SidebarInset>
     </SidebarProvider>
@@ -541,8 +539,157 @@ function PromptLibrary({ prompts }: { prompts: PromptRow[] }) {
   );
 }
 
+const VIDEO10_STORAGE_KEY = "lila_video_10scene_template";
+const MAX_VIDEO_SCENES = 10;
 
-type PresetRow = {
+type VideoSceneEntry = { id: string; title: string; prompt: string };
+
+const DEFAULT_VIDEO_SCENES: VideoSceneEntry[] = [
+  { id: "v1",  title: "Scene 1 — Wake",        prompt: " Medium-wide cinematic shot of Lila Valentina Rossi completely nude under large rain showerhead, water cascading sensually over her voluptuous tanned body with long wavy dark hair, seductive smile looking at camera, golden hour light from window " },
+  { id: "v2",  title: "Scene 2 — Kitchen",     prompt: " Close-up shot as she slowly caresses and squeezes her large full breasts, water droplets running down her hard nipples, sensual expression on her face  " },
+  { id: "v3",  title: "Scene 3 — Mirror",      prompt: "Lila  reaches down with one hand and starts rubbing her wet pussy, legs slightly spread, steam rising in the luxurious marble shower, body glistening with water  ." },
+  { id: "v4",  title: "Scene 4 — Closet",      prompt: " Intense close-up of two fingers sliding deep in and out of her vagina, water mixing with her juices, highly detailed wet sin texture and realistic motion  ." },
+  { id: "v5",  title: "Scene 5 — Commute",     prompt: "Lila  arches her back against the marble wall in pleasure, breasts pushed forward, moaning expression on her face with eyes half closed ." },
+  { id: "v6",  title: "Scene 6 — Studio Desk", prompt: "Lila Legs spread wider as she fingers herself faster, body moving rhythmically, cinematic side lighting highlighting her curves and wet skin " },
+  { id: "v7",  title: "Scene 7 — Fitting",     prompt:  Lila Valentina Rossi standing completely naked in front of a large elegant bedroom mirror with soft warm lighting, taking a seductive selfie with her phone, perfect hourglass figure on full display." },
+  { id: "v8",  title: "Scene 8 — Golden Hour", prompt: "Lila Valentina Rossi completely nude leaning on a luxurious marble kitchen island with Boston skyline visible through large windows, golden hour warm light illuminating her body  " },
+  { id: "v9",  title: "Scene 9 — Evening",     prompt: " Post-orgasm, she gently touches her sensitive swollen pussy, breathing heavily with a satisfied glowing expression" },
+  { id: "v10", title: "Scene 10 — Goodnight",  prompt: " Dramatic cinematic wide shot of Lila Valentina Rossi completely nude on a luxurious penthouse balcony at night, city lights twinkling in the background, strong chiaroscuro lighting with moonlight highlighting her curves ." },
+];
+
+function loadVideoScenes(): VideoSceneEntry[] {
+  try {
+    const raw = localStorage.getItem(VIDEO10_STORAGE_KEY);
+    if (!raw) return DEFAULT_VIDEO_SCENES;
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.length ? parsed.slice(0, MAX_VIDEO_SCENES) : DEFAULT_VIDEO_SCENES;
+  } catch {
+    return DEFAULT_VIDEO_SCENES;
+  }
+}
+
+function VideoSceneTemplateLibrary() {
+  const [scenesList, setScenesList] = useState<VideoSceneEntry[]>(() => loadVideoScenes());
+  const [dirty, setDirty] = useState(false);
+
+  const updateScene = (id: string, patch: Partial<VideoSceneEntry>) => {
+    setScenesList((list) => list.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+    setDirty(true);
+  };
+
+  const addScene = () => {
+    if (scenesList.length >= MAX_VIDEO_SCENES) {
+      toast.error(`Max ${MAX_VIDEO_SCENES} scenes per video template`);
+      return;
+    }
+    const n = scenesList.length + 1;
+    setScenesList((list) => [...list, { id: `v${Date.now()}`, title: `Scene ${n}`, prompt: "" }]);
+    setDirty(true);
+  };
+
+  const removeScene = (id: string) => {
+    setScenesList((list) => list.filter((s) => s.id !== id));
+    setDirty(true);
+  };
+
+  const save = () => {
+    try {
+      localStorage.setItem(VIDEO10_STORAGE_KEY, JSON.stringify(scenesList));
+      setDirty(false);
+      toast.success("10-scene video template saved");
+    } catch {
+      toast.error("Failed to save — check browser storage");
+    }
+  };
+
+  const resetToDefaults = () => {
+    setScenesList(DEFAULT_VIDEO_SCENES);
+    setDirty(true);
+  };
+
+  const copyAll = async () => {
+    const combined = scenesList
+      .map((s, i) => `${i + 1}. ${s.title}: ${s.prompt}`)
+      .join("\n");
+    try {
+      await navigator.clipboard.writeText(combined);
+      toast.success("All scene prompts copied");
+    } catch {
+      toast.error("Clipboard copy failed");
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3 className="font-display text-lg font-semibold">10-Scene Video Prompt Template</h3>
+          <p className="text-sm text-muted-foreground">
+            One continuous video built from up to {MAX_VIDEO_SCENES} scene prompts, fired in order.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Badge variant="outline" className="border-border bg-background/40 text-muted-foreground">
+            {scenesList.length} / {MAX_VIDEO_SCENES} scenes
+          </Badge>
+          <Button size="sm" variant="outline" onClick={copyAll}>Copy all</Button>
+          <Button size="sm" variant="outline" onClick={resetToDefaults}>Reset</Button>
+          <Button size="sm" onClick={save} disabled={!dirty}>
+            <Save className="mr-2 h-3.5 w-3.5" /> Save template
+          </Button>
+        </div>
+      </div>
+
+      <div className="space-y-3">
+        {scenesList.map((s, i) => (
+          <Card key={s.id} className="border-border/60 bg-card/80">
+            <CardContent className="space-y-3 p-4">
+              <div className="flex items-center gap-3">
+                <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full border border-primary/30 bg-primary/10 text-xs font-semibold text-primary">
+                  {i + 1}
+                </span>
+                <Input
+                  value={s.title}
+                  onChange={(e) => updateScene(s.id, { title: e.target.value })}
+                  className="h-8 max-w-xs text-sm font-medium"
+                  placeholder={`Scene ${i + 1} title`}
+                />
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="ml-auto h-7 w-7 text-destructive hover:text-destructive"
+                  onClick={() => removeScene(s.id)}
+                  title="Remove scene"
+                >
+                  ×
+                </Button>
+              </div>
+              <Textarea
+                rows={2}
+                value={s.prompt}
+                onChange={(e) => updateScene(s.id, { prompt: e.target.value })}
+                placeholder="Describe this scene — setting, action, lighting, mood…"
+                className="text-xs"
+              />
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+
+      <Button
+        size="sm"
+        variant="outline"
+        className="gap-2"
+        onClick={addScene}
+        disabled={scenesList.length >= MAX_VIDEO_SCENES}
+      >
+        <Plus className="h-3.5 w-3.5" /> Add scene ({scenesList.length}/{MAX_VIDEO_SCENES})
+      </Button>
+    </div>
+  );
+}
+
+
   id: string; key: string; label: string;
   prompt_style: string | null; caption_style: string | null; negative_prompt: string | null;
 };
@@ -742,63 +889,6 @@ function ReviewCaptionsSection() {
             ))}
           </div>
         )}
-      </CardContent>
-    </Card>
-  );
-}
-
-function MemorySection({
-  memory,
-  setMemory,
-}: {
-  memory: {
-    locations: string;
-    themes: string;
-    lifestyle: string;
-    pet: string;
-    brand: string;
-  };
-  setMemory: React.Dispatch<React.SetStateAction<any>>;
-}) {
-  const fields: Array<{
-    key: keyof typeof memory;
-    label: string;
-    icon: React.ComponentType<{ className?: string }>;
-  }> = [
-    { key: "locations", label: "Favorite Locations", icon: MapPin },
-    { key: "themes", label: "Recurring Themes", icon: Sparkles },
-    { key: "lifestyle", label: "Lifestyle Notes", icon: Heart },
-    { key: "pet", label: "Pet Information", icon: Dog },
-    { key: "brand", label: "Brand Context", icon: Crown },
-  ];
-
-  return (
-    <Card className="border-border/60 bg-card/80">
-      <CardContent className="space-y-5 p-6 md:p-8">
-        <div className="flex items-center gap-2">
-          <BookOpen className="h-5 w-5 text-primary" />
-          <h3 className="font-display text-lg font-semibold">Memory</h3>
-        </div>
-        <p className="text-sm text-muted-foreground">
-          Persistent context for future caption + script generation.
-        </p>
-        <div className="space-y-4">
-          {fields.map((f) => (
-            <div key={f.key} className="space-y-2">
-              <Label className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-muted-foreground">
-                <f.icon className="h-3.5 w-3.5 text-primary" />
-                {f.label}
-              </Label>
-              <Textarea
-                rows={2}
-                value={memory[f.key]}
-                onChange={(e) =>
-                  setMemory((m: any) => ({ ...m, [f.key]: e.target.value }))
-                }
-              />
-            </div>
-          ))}
-        </div>
       </CardContent>
     </Card>
   );
