@@ -484,7 +484,9 @@ function ReviewPage() {
   const [typeFilter, setTypeFilter] = useState<ContentType | "all">("all");
   const [noteDraft, setNoteDraft] = useState("");
 
-  // Draft post-meta for the open item — committed to local state/localStorage on Save.
+  // Draft post-meta for the open item — this is the SOURCE OF TRUTH while the
+  // detail sheet is open. Both "Save post details" and "Schedule" read from
+  // these draft values, never from the (possibly stale) items array.
   const [draftPostType, setDraftPostType] = useState<PostType>("normal");
   const [draftPrice, setDraftPrice] = useState<number>(PPV_PRICE_PRESETS[0]);
   const [draftCaption, setDraftCaption] = useState<string>("");
@@ -606,24 +608,41 @@ function ReviewPage() {
     } catch (e: any) { toast.error(e?.message ?? "Failed to save note"); }
   };
 
-  // Local-only — writes to localStorage, never to Supabase.
+  // Builds a fresh PostMeta object from whatever is CURRENTLY in the draft
+  // fields. Used by both "Save post details" and "Schedule" so neither path
+  // can ever send stale data.
+  const buildFreshMeta = (): PostMeta => ({
+    postType: draftPostType,
+    price: draftPostType === "ppv" ? draftPrice : 0,
+    caption: draftCaption,
+  });
+
+  // Commits the draft to local item state + localStorage. Returns the fresh
+  // meta so callers (like scheduleFromDetail) can use it immediately without
+  // waiting on a state update / re-render.
+  const commitPostMeta = (item: ReviewItem): PostMeta => {
+    const fresh = buildFreshMeta();
+    setItems((arr) => arr.map((i) => (i.id === item.id ? { ...i, postMeta: fresh } : i)));
+    const map = loadPostMetaMap();
+    map[item.contentId] = fresh;
+    savePostMetaMap(map);
+    return fresh;
+  };
+
   const savePostMeta = (id: string) => {
     const item = items.find((i) => i.id === id);
     if (!item) return;
-
-    const updated: PostMeta = {
-      postType: draftPostType,
-      price: draftPostType === "ppv" ? draftPrice : 0,
-      caption: draftCaption,
-    };
-
-    setItems((arr) => arr.map((i) => (i.id === id ? { ...i, postMeta: updated } : i)));
-
-    const map = loadPostMetaMap();
-    map[item.contentId] = updated;
-    savePostMetaMap(map);
-
+    commitPostMeta(item);
     toast.success("Post details saved");
+  };
+
+  // FIX: Schedule now always commits the live draft values first, then opens
+  // the dialog with the item carrying those exact fresh values — so it can
+  // never show/send what was there before your edits.
+  const scheduleFromDetail = (item: ReviewItem) => {
+    const fresh = commitPostMeta(item);
+    setScheduleItem({ ...item, postMeta: fresh });
+    setOpenId(null);
   };
 
   const toggleSelect = (id: string) =>
@@ -783,7 +802,7 @@ function ReviewPage() {
                 onSavePostMeta={() => savePostMeta(openItem.id)}
                 onApprove={() => approve(openItem.id)}
                 onReject={() => reject(openItem.id)}
-                onSchedule={() => { setScheduleItem(openItem); setOpenId(null); }}
+                onSchedule={() => scheduleFromDetail(openItem)}
               />
             )}
           </SheetContent>
@@ -946,7 +965,7 @@ function DetailPanel({
           </div>
 
           {/* Approve / Reject / Schedule */}
-          <div className={cn("grid gap-2", isApproved || isScheduled ? "grid-cols-2" : "grid-cols-2")}>
+          <div className="grid grid-cols-2 gap-2">
             {!isScheduled && (
               <Button variant="outline" onClick={onReject} disabled={item.status === "rejected"}>
                 <XCircle className="mr-1.5 h-4 w-4" /> Reject
@@ -958,7 +977,7 @@ function DetailPanel({
               </Button>
             )}
             {(isApproved || isScheduled) && (
-              <Button onClick={onSchedule} disabled={isScheduled} className="gap-1.5 col-span-1">
+              <Button onClick={onSchedule} disabled={isScheduled} className="gap-1.5">
                 <CalendarPlus className="h-4 w-4" />
                 {isScheduled ? "Scheduled ✓" : "Schedule now"}
               </Button>
@@ -967,7 +986,9 @@ function DetailPanel({
 
           {isApproved && (
             <div className="rounded-lg border border-success/30 bg-success/5 px-3 py-2.5">
-              <p className="text-sm font-medium text-success">✓ Approved — click "Schedule now" to set a publish time</p>
+              <p className="text-sm font-medium text-success">
+                ✓ Approved — "Schedule now" uses whatever is currently in Post details below, even if unsaved.
+              </p>
             </div>
           )}
 
@@ -1055,10 +1076,15 @@ function DetailPanel({
               />
             </div>
 
-            <div className="flex justify-end">
-              <Button size="sm" onClick={onSavePostMeta} disabled={!isDirty || isScheduled}>
-                Save post details
-              </Button>
+            <div className="flex items-center justify-between">
+              {isDirty && !isScheduled && (
+                <span className="text-[11px] text-muted-foreground">Unsaved changes — will still be used if you click Schedule.</span>
+              )}
+              <div className="ml-auto">
+                <Button size="sm" onClick={onSavePostMeta} disabled={!isDirty || isScheduled}>
+                  Save post details
+                </Button>
+              </div>
             </div>
           </section>
 
