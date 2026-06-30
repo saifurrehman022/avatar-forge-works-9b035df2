@@ -97,18 +97,7 @@ export const AppSidebar = () => {
         </SidebarGroup>
       </SidebarContent>
 
-      <SidebarFooter className="border-t border-sidebar-border">
-        {!collapsed && (
-          <div className="mx-2 mb-2 mt-1 rounded-lg border border-sidebar-border bg-sidebar-accent/40 p-3">
-            <p className="text-[11px] font-medium text-foreground">
-              Pipeline online
-            </p>
-            <p className="mt-0.5 text-[10px] text-muted-foreground">
-              RunPod · 3 workers idle
-            </p>
-          </div>
-        )}
-      </SidebarFooter>
+     
     </Sidebar>
   );
 };
