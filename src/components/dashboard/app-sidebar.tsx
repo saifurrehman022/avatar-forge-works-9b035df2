@@ -6,7 +6,7 @@ import {
   ClipboardCheck,
   CalendarClock,
   UserCircle2,
-  Settings,
+  
 } from "lucide-react";
 
 import {
