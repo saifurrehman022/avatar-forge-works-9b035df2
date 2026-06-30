@@ -1,4 +1,3 @@
-
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -10,7 +9,7 @@ import {
   Filter, Inbox, ChevronLeft, ChevronRight, MoreHorizontal,
   Trash2, Eye, RefreshCw, AlertTriangle, Link2,
   Loader2, Plug, CheckCircle, XCircle, ExternalLink, Bug,
-  ChevronDown, ChevronUp,
+  ChevronDown, ChevronUp, DollarSign, Tag,
 } from "lucide-react";
 import { toast } from "sonner";
 import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
@@ -40,6 +39,7 @@ const FANVUE_REDIRECT_URI  = "https://www.madamlila.com/schedule";
 const FANVUE_AUTH_URL      = "https://auth.fanvue.com/oauth2/auth";
 const FANVUE_API_BASE      = "https://api.fanvue.com";
 const FANVUE_API_VERSION   = "2025-06-26";
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Post meta (caption / price / postType) — set in Review page, stored
 // client-side in localStorage under this exact key so both pages agree.
@@ -47,6 +47,7 @@ const FANVUE_API_VERSION   = "2025-06-26";
 type PostType = "normal" | "ppv";
 type PostMeta = { postType: PostType; price: number; caption: string };
 
+const PPV_PRICE_PRESETS = [5, 15, 20];
 const POST_META_STORAGE_KEY = "lila_review_post_meta"; // MUST match review.tsx exactly
 
 function loadPostMetaMap(): Record<string, PostMeta> {
@@ -60,6 +61,22 @@ function getPostMetaFor(contentId: string, fallbackCaption: string): PostMeta {
   const map = loadPostMetaMap();
   return map[contentId] ?? { postType: "normal", price: 0, caption: fallbackCaption };
 }
+
+function PostTypeBadge({ postMeta }: { postMeta: PostMeta }) {
+  if (postMeta.postType === "ppv") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full border border-chart-4/30 bg-chart-4/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-chart-4">
+        <DollarSign className="h-3 w-3" /> PPV · ${postMeta.price}
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/50 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+      <Tag className="h-3 w-3" /> Normal
+    </span>
+  );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Debug logger
 // ─────────────────────────────────────────────────────────────────────────────
@@ -127,11 +144,6 @@ async function startFanvueOAuth() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Token exchange — routed through /api/fanvue-token Vercel function
-// WHY: Browsers block direct CORS requests to auth.fanvue.com from fetch().
-// The Vercel function proxies the POST server-side where CORS doesn't apply.
-//
-// Create this file in your Vercel project: /api/fanvue-token.ts
-// Contents are shown at the bottom of this file as a comment.
 // ─────────────────────────────────────────────────────────────────────────────
 async function exchangeFanvueCode(code: string): Promise<StoredToken> {
   const verifier = sessionStorage.getItem(PKCE_KEY);
@@ -141,7 +153,6 @@ async function exchangeFanvueCode(code: string): Promise<StoredToken> {
 
   log("Exchanging code via /api/fanvue-token…");
 
-  // Route through our Vercel API function — this avoids browser CORS on auth.fanvue.com
   const res = await fetch("/api/fanvue-token", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -162,7 +173,6 @@ async function exchangeFanvueCode(code: string): Promise<StoredToken> {
   const { access_token, refresh_token, expires_in, profile } = data;
   if (!access_token) throw new Error("No access_token returned: " + text);
 
-  // Profile comes from /users/me called server-side in the API function
   const stored: StoredToken = {
     accessToken:   access_token,
     refreshToken:  refresh_token,
@@ -186,14 +196,8 @@ const fvH = (token: string, extra?: Record<string, string>) => ({
   ...extra,
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Media download
-// CloudFront URLs need a server-side proxy (CORS). Supabase public URLs work direct.
-// ─────────────────────────────────────────────────────────────────────────────
 async function fetchMediaBlob(mediaUrl: string): Promise<Blob> {
   log("Downloading media…", mediaUrl.slice(0, 100));
-
-  // Try direct first (works for Supabase public buckets)
   try {
     const r = await fetch(mediaUrl);
     if (r.ok) {
@@ -203,7 +207,6 @@ async function fetchMediaBlob(mediaUrl: string): Promise<Blob> {
     logW(`Direct fetch ${r.status} — trying proxy`);
   } catch (e: any) { logW("Direct fetch blocked (CORS)", e?.message); }
 
-  // Proxy fallback — /api/proxy-media.ts (see comment at bottom of file)
   log("Trying /api/proxy-media…");
   const r2 = await fetch(`/api/proxy-media?url=${encodeURIComponent(mediaUrl)}`);
   if (r2.ok) {
@@ -220,57 +223,24 @@ async function fetchMediaBlob(mediaUrl: string): Promise<Blob> {
 // ─────────────────────────────────────────────────────────────────────────────
 // Publish pipeline
 //
-// CONFIRMED endpoints from official Fanvue API docs:
-//   POST  /media/uploads                            → {mediaUuid, uploadId}
-//   GET   /media/uploads/{uploadId}/parts/1/url     → presigned S3 URL (text/plain)
-//   PUT   {presignedUrl}                            → ETag
-//   PATCH /media/uploads/{uploadId}                 → {status}
-//   GET   /media/{uuid}                             → poll {status: created|processing|ready|error}
-//   POST  /posts                                    → {uuid} (201)
+// UPDATED: publishToFanvue now accepts postType + price (from review.tsx's
+// Post Details) and includes them in the /posts payload. When postType is
+// "ppv", `price` is sent (assumed USD, converted to cents — adjust the field
+// name/units below to match whatever your Fanvue plan/contract specifies if
+// different from `priceCents`).
 // ─────────────────────────────────────────────────────────────────────────────
-// ─────────────────────────────────────────────────────────────────────────────
-// FIXED: publishToFanvue
-//
-// BUGS FIXED vs previous version:
-//
-// 1. token.access_token → token.accessToken
-//    StoredToken type uses `accessToken` (camelCase). The old code used
-//    `token.access_token` everywhere inside publishToFanvue, which evaluates
-//    to `undefined` — meaning every API call sent "Authorization: Bearer undefined".
-//    This caused silent 401s on every step despite appearing to have a token.
-//
-// 2. Step 1 body: FormData → JSON
-//    The Fanvue POST /media/uploads endpoint expects:
-//      Content-Type: application/json
-//      { name, filename, mediaType }   ← mediaType is an enum: "image"|"video"
-//    NOT FormData with content_type/size fields. FormData was being rejected
-//    silently or returning a confusing 400.
-//
-// 3. Step 2 presigned URL path
-//    Correct non-agency path: GET /media/uploads/{uploadId}/parts/{partNumber}/url
-//    This was already correct — kept as-is.
-//
-// 4. Media poll status
-//    The API returns lowercase "ready" — poll confirmed against spec.
-//    Also added "finalised" as an alias since some Fanvue responses use it.
-//
-// 5. S3 PUT: removed explicit Content-Type from the PUT to avoid S3
-//    signature mismatch. S3 presigned URLs include the content-type in the
-//    signature if it was specified at session creation. Since we don't specify
-//    it in Step 1, we must not set it in the PUT either.
-// ─────────────────────────────────────────────────────────────────────────────
-
 async function publishToFanvue(params: {
   token: StoredToken;
   mediaUrl: string;
   mediaType: "image" | "video";
   caption: string;
+  postType: PostType;
+  price: number;
   onProgress?: (s: string) => void;
 }): Promise<string> {
-  const { token, mediaUrl, mediaType, caption, onProgress } = params;
+  const { token, mediaUrl, mediaType, caption, postType, price, onProgress } = params;
   const rep = (s: string) => { log(s); onProgress?.(s); };
 
-  // FIX #1: use token.accessToken (not token.access_token)
   const accessToken = token.accessToken;
   if (!accessToken) throw new Error("No access token — reconnect Fanvue account.");
 
@@ -279,36 +249,23 @@ async function publishToFanvue(params: {
   logOk(`Authenticated as @${token.handle}`);
   rep(`Authenticated as @${token.handle}`);
 
-  // Download media blob
   const blob = await fetchMediaBlob(mediaUrl);
   const ext      = mediaType === "video" ? "mp4" : "jpg";
   const filename = `lila-${Date.now()}.${ext}`;
-  // FIX #2a: mediaType for the API must be the enum string "image" or "video"
-  const apiMediaType = mediaType; // already "image" | "video" — matches the enum
+  const apiMediaType = mediaType;
   rep(`Media ready: ${(blob.size / 1024).toFixed(0)} KB`);
 
   // ── Step 1: POST /media/uploads ─────────────────────────────────────────
   rep("Step 1/5 — Creating upload session…");
-
-  // FIX #2b: send JSON, not FormData. Required fields: name, filename, mediaType
-  const step1Body = JSON.stringify({
-    name:      filename,
-    filename:  filename,
-    mediaType: apiMediaType,
-  });
-
+  const step1Body = JSON.stringify({ name: filename, filename, mediaType: apiMediaType });
   const s1R = await fetch(`/api/fanvue-api?path=/media/uploads`, {
     method:  "POST",
-    headers: {
-      // FIX #1: use accessToken not access_token
-      ...fvH(accessToken, { "Content-Type": "application/json" }),
-    },
+    headers: { ...fvH(accessToken, { "Content-Type": "application/json" }) },
     body: step1Body,
   });
   const s1T = await s1R.text();
   log(`POST /media/uploads → ${s1R.status}`, s1T.slice(0, 300));
   if (!s1R.ok) throw new Error(`Step 1 failed (${s1R.status}): ${s1T}`);
-
   const { mediaUuid, uploadId } = JSON.parse(s1T);
   if (!mediaUuid || !uploadId) throw new Error(`Step 1: missing mediaUuid/uploadId in: ${s1T}`);
   logOk("Upload session created", `mediaUuid=${mediaUuid} uploadId=${uploadId}`);
@@ -316,33 +273,20 @@ async function publishToFanvue(params: {
 
   // ── Step 2: GET presigned S3 URL ────────────────────────────────────────
   rep("Step 2/5 — Getting S3 upload URL…");
-  const s2R = await fetch(
-    `/api/fanvue-api?path=/media/uploads/${uploadId}/parts/1/url`,
-    // FIX #1: use accessToken
-    { headers: fvH(accessToken) },
-  );
+  const s2R = await fetch(`/api/fanvue-api?path=/media/uploads/${uploadId}/parts/1/url`, { headers: fvH(accessToken) });
   const s2T = (await s2R.text()).trim();
   log(`GET presigned URL → ${s2R.status}`, s2T.slice(0, 200));
   if (!s2R.ok) throw new Error(`Step 2 failed (${s2R.status}): ${s2T}`);
-
-  // Strip surrounding quotes the API sometimes adds
   const presigned = s2T.replace(/^"|"$/g, "");
-  if (!presigned.startsWith("https://")) {
-    throw new Error(`Step 2: response is not a URL: "${presigned.slice(0, 120)}"`);
-  }
+  if (!presigned.startsWith("https://")) throw new Error(`Step 2: response is not a URL: "${presigned.slice(0, 120)}"`);
   logOk("Got presigned URL");
   rep("Step 2 ✓");
 
   // ── Step 3: PUT to S3 ───────────────────────────────────────────────────
   rep(`Step 3/5 — Uploading ${(blob.size / 1024).toFixed(0)} KB to S3…`);
-
-  // FIX #5: do NOT set Content-Type on the PUT — the presigned URL was
-  // created without a content-type constraint so S3 will accept any type.
-  // Setting an explicit Content-Type can cause a SignatureDoesNotMatch error.
   const s3R = await fetch(presigned, { method: "PUT", body: blob });
   log(`PUT S3 → ${s3R.status}`);
   if (!s3R.ok) throw new Error(`Step 3 S3 upload failed (${s3R.status}): ${await s3R.text()}`);
-
   const rawEtag = s3R.headers.get("ETag") ?? s3R.headers.get("etag") ?? "";
   const etag    = rawEtag.replace(/^"|"$/g, "");
   if (!etag) throw new Error("Step 3: S3 returned no ETag — check presigned URL validity");
@@ -353,7 +297,6 @@ async function publishToFanvue(params: {
   rep("Step 4/5 — Completing upload session…");
   const s4R = await fetch(`/api/fanvue-api?path=/media/uploads/${uploadId}`, {
     method:  "PATCH",
-    // FIX #1: use accessToken
     headers: fvH(accessToken, { "Content-Type": "application/json" }),
     body:    JSON.stringify({ parts: [{ PartNumber: 1, ETag: etag }] }),
   });
@@ -365,14 +308,13 @@ async function publishToFanvue(params: {
 
   // ── Step 5: Poll GET /media/{uuid} ───────────────────────────────────────
   rep("Step 5/5 — Waiting for Fanvue to process media…");
-  const READY_STATES = new Set(["ready", "finalised"]); // API uses "ready"; alias just in case
-  const deadline     = Date.now() + 180_000; // 3 min
+  const READY_STATES = new Set(["ready", "finalised"]);
+  const deadline     = Date.now() + 180_000;
   let attempt        = 0;
   let lastStatus     = "";
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 4000));
     attempt++;
-    // FIX #1: use accessToken
     const pR = await fetch(`/api/fanvue-api?path=/media/${mediaUuid}`, { headers: fvH(accessToken) });
     log(`Poll #${attempt} → ${pR.status}`);
     if (pR.status === 404) { logW("404 on poll — waiting…"); continue; }
@@ -386,15 +328,20 @@ async function publishToFanvue(params: {
   if (Date.now() >= deadline) throw new Error("Timed out (3 min) waiting for Fanvue to process media.");
 
   // ── Step 6: POST /posts ──────────────────────────────────────────────────
+  // NOTE: `price` is sent only for PPV posts. Fanvue's docs call this field
+  // `price` (in the platform's smallest currency unit, i.e. cents) on
+  // pay-per-view posts — adjust the key name below if your account uses a
+  // different contract (e.g. `priceInCents` / `amount`).
   rep("Creating post on Fanvue…");
-  const postBody = {
+  const postBody: Record<string, unknown> = {
     text:       caption,
     mediaUuids: [mediaUuid],
-    audience:   "followers-and-subscribers",
-    
+    audience:   postType === "ppv" ? "followers-and-subscribers" : "followers-and-subscribers",
   };
+  if (postType === "ppv") {
+    postBody.price = Math.round(price * 100); // dollars → cents
+  }
   log("POST /posts", JSON.stringify(postBody));
-  // FIX #1: use accessToken
   const postR = await fetch(`/api/fanvue-api?path=/posts`, {
     method:  "POST",
     headers: fvH(accessToken, { "Content-Type": "application/json" }),
@@ -411,21 +358,6 @@ async function publishToFanvue(params: {
   rep(`Done! UUID: ${postUuid}`);
   return postUuid as string;
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Also fix publishNow in SchedulePage — same access_token → accessToken typo:
-//
-// OLD (broken):
-//   const token = loadToken();
-//   if (!token?.accessToken) { ... }          ← check is correct
-//   ...
-//   token, mediaUrl: item.mediaUrl, ...        ← token passed in
-//   ...
-//   // Inside publishToFanvue: token.access_token  ← UNDEFINED! typo
-//
-// The fix is entirely inside publishToFanvue above (token.accessToken).
-// No change needed to publishNow itself.
-// ─────────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Route
@@ -457,13 +389,12 @@ type QueueStatus   = "waiting" | "ready" | "publishing" | "published" | "failed"
 type ContentType   = "image" | "video";
 type HistoryEvent  = { at: string; label: string; kind: "scheduled"|"publishing"|"published"|"failed"|"retried" };
 type ScheduledItem = {
-  id: string; contentId: string; contentName: string; type: ContentType; character: string; // ADD contentId
+  id: string; contentId: string; contentName: string; type: ContentType; character: string;
   thumbnail: string; mediaUrl: string; scheduledAt: string;
   status: PublishStatus; queueStatus: QueueStatus; autoPublish: boolean;
   externalPostId?: string; publishedAt?: string;
-  settings: { fps: number; framesPerScene: number; numScenes: number; samplingSteps: number };
-  scenePrompts: string[]; negativePrompt: string; history: HistoryEvent[];
-  postMeta: PostMeta; // NEW — the source of truth for what actually gets posted
+  history: HistoryEvent[];
+  postMeta: PostMeta; // source of truth for what actually gets posted (set in Review)
 };
 
 const EMPTY: ScheduledItem[] = [];
@@ -490,12 +421,10 @@ async function fetchSchedules(): Promise<ScheduledItem[]> {
     const src:any = isVideo ? vidMap.get(r.content_id) : imgMap.get(r.content_id);
     const char:any= src?.character_id ? charMap.get(src.character_id) : null;
     const scenes  = isVideo && Array.isArray(src?.scene_prompts) ? src.scene_prompts : src?.prompt ? [src.prompt] : [];
-    //const media   = isVideo ? src?.video_url : src?.image_url;
-    //const thumb   = char?.reference_image_url || media || PLACEHOLDER;
     const media   = isVideo ? src?.video_url : src?.image_url;
     const thumb   = char?.reference_image_url || media || PLACEHOLDER;
 
-    // NEW — pull caption/price/postType from the SAME localStorage map review.tsx writes to.
+    // Pull caption/price/postType from the SAME localStorage map review.tsx writes to.
     // r.content_id is the images/videos row id — exactly what review.tsx keys on.
     const fallbackCaption = scenes[0] ?? src?.prompt ?? "Untitled";
     const postMeta = getPostMetaFor(r.content_id, fallbackCaption);
@@ -503,21 +432,19 @@ async function fetchSchedules(): Promise<ScheduledItem[]> {
     const queueStatus: QueueStatus = status==="published"?"published":status==="failed"?"failed":status==="publishing"?"publishing":new Date(r.publish_time)<=new Date()?"ready":"waiting";
     return {
       id: r.id,
-      contentId: r.content_id,          // NEW
-      contentName: `${char?.name??"Lila"} — ${(scenes[0]??"Untitled").slice(0,40)}`,
+      contentId: r.content_id,
+      contentName: `${char?.name??"Lila"} — ${(postMeta.caption || "Untitled").slice(0,40)}`,
       type: r.content_type, character: char?.name??"Lila",
       thumbnail: thumb, mediaUrl: media||"",
       scheduledAt: r.publish_time, status, queueStatus, autoPublish: true,
       externalPostId: src?.external_post_id??undefined,
       publishedAt: src?.published_at??undefined,
-      settings: { fps:16, framesPerScene:257, numScenes:scenes.length||1, samplingSteps:29 },
-      scenePrompts: scenes, negativePrompt: "low quality, blurry, distorted face, watermark",
-      postMeta,                          // NEW
+      postMeta,
       history: [
-          { at: r.created_at, label: `Scheduled for ${new Date(r.publish_time).toLocaleString()}`, kind: "scheduled" },
-          ...(src?.published_at?[{at:src.published_at,label:"Published",kind:"published" as const}]:[]),
-  ],
-};
+        { at: r.created_at, label: `Scheduled for ${new Date(r.publish_time).toLocaleString()}`, kind: "scheduled" },
+        ...(src?.published_at?[{at:src.published_at,label:"Published",kind:"published" as const}]:[]),
+      ],
+    };
   });
 }
 
@@ -529,8 +456,14 @@ async function fetchApprovedAssets() {
   ]);
   const charMap = new Map((charR.data??[]).map((c:any)=>[c.id,c]));
   return [
-    ...(imgR.data??[]).map((i:any)=>({id:i.id,type:"image" as const,name:`${charMap.get(i.character_id)?.name??"Lila"} — ${(i.prompt??"Image").slice(0,40)}`,thumbnail:i.image_url??""})),
-    ...(vidR.data??[]).map((v:any)=>({id:v.id,type:"video" as const,name:`${charMap.get(v.character_id)?.name??"Lila"} — ${(v.prompt??"Video").slice(0,40)}`,thumbnail:charMap.get(v.character_id)?.reference_image_url??""})),
+    ...(imgR.data??[]).map((i:any)=>{
+      const meta = getPostMetaFor(i.id, i.prompt ?? "Image");
+      return {id:i.id,type:"image" as const,name:`${charMap.get(i.character_id)?.name??"Lila"} — ${(meta.caption||"Image").slice(0,40)}`,thumbnail:i.image_url??"",postMeta:meta};
+    }),
+    ...(vidR.data??[]).map((v:any)=>{
+      const meta = getPostMetaFor(v.id, v.prompt ?? "Video");
+      return {id:v.id,type:"video" as const,name:`${charMap.get(v.character_id)?.name??"Lila"} — ${(meta.caption||"Video").slice(0,40)}`,thumbnail:charMap.get(v.character_id)?.reference_image_url??"",postMeta:meta};
+    }),
   ];
 }
 
@@ -706,6 +639,7 @@ function SchedulePage() {
       .subscribe();
     return ()=>{supabase.removeChannel(ch);};
   },[queryClient]);
+
   // Auto-publish: check every 30 seconds for due items
   useEffect(() => {
     const checkAndPublish = async () => {
@@ -730,6 +664,7 @@ function SchedulePage() {
     return () => clearInterval(interval);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items]);
+
   const [tab,setTab]               = useState("calendar");
   const [search,setSearch]         = useState("");
   const [statusFilter,setStatusFilter] = useState<"all"|PublishStatus>("all");
@@ -759,7 +694,7 @@ function SchedulePage() {
         if(rangeFilter==="week"){const wk=new Date(now);wk.setDate(wk.getDate()+7);if(d<now||d>wk)return false;}
         if(rangeFilter==="month"&&(d.getMonth()!==now.getMonth()||d.getFullYear()!==now.getFullYear()))return false;
       }
-      if(search.trim()&&![i.contentName,i.character].join(" ").toLowerCase().includes(search.toLowerCase()))return false;
+      if(search.trim()&&![i.contentName,i.character,i.postMeta.caption].join(" ").toLowerCase().includes(search.toLowerCase()))return false;
       return true;
     });
   },[items,statusFilter,rangeFilter,search]);
@@ -796,11 +731,15 @@ function SchedulePage() {
     const tid=`pub-${id}`;
     toast.loading("Starting Fanvue publish…",{id:tid,duration:Infinity});
     try{
-      //const caption=item.scenePrompts[0]??item.contentName;
-      const freshMeta = getPostMetaFor(item.contentId, item.scenePrompts[0] ?? item.contentName);
-      const caption = freshMeta.caption || item.scenePrompts[0] || item.contentName;
+      // Always re-read the freshest post details (caption/price/postType) right
+      // before publishing, in case they were edited in Review after this item
+      // was scheduled.
+      const freshMeta = getPostMetaFor(item.contentId, item.postMeta.caption || item.contentName);
+      const caption = freshMeta.caption || item.contentName;
+
       const postUuid=await publishToFanvue({
         token, mediaUrl:item.mediaUrl, mediaType:item.type, caption,
+        postType: freshMeta.postType, price: freshMeta.price,
         onProgress:s=>toast.loading(s,{id:tid,duration:Infinity}),
       });
       const now=new Date().toISOString();
@@ -812,7 +751,8 @@ function SchedulePage() {
       await scheduleService.update(id,{status:"published"});
       updateItem(id,{
         status:"published",queueStatus:"published",externalPostId:postUuid,publishedAt:now,
-        history:[...item.history,{at:now,label:`Published to @${token.handle}`,kind:"published"}],
+        postMeta: freshMeta,
+        history:[...item.history,{at:now,label:`Published to @${token.handle}${freshMeta.postType==="ppv"?` (PPV $${freshMeta.price})`:""}`,kind:"published"}],
       });
       toast.success(`Published to @${token.handle}!`,{
         id:tid,duration:12_000,
@@ -911,7 +851,7 @@ function SchedulePage() {
               <CardContent className="flex flex-col gap-3 p-4 lg:flex-row lg:items-center">
                 <div className="relative flex-1">
                   <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"/>
-                  <Input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search character, content…" className="pl-9"/>
+                  <Input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search character, caption…" className="pl-9"/>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <Filter className="h-4 w-4 text-muted-foreground"/>
@@ -1019,9 +959,13 @@ function CalendarView({weekStart,setWeekStart,items,onOpen,onDragStart,onDropOnD
                           </div>
                           <div className="absolute right-1 top-1"><StatusBadge status={i.status}/></div>
                         </div>
-                        <div className="px-0.5">
+                        <div className="px-0.5 space-y-1">
                           <p className="truncate text-xs font-medium">{i.character}</p>
-                          <p className="text-[10px] text-muted-foreground">{fmtT(i.scheduledAt)}</p>
+                          <p className="truncate text-[10px] text-muted-foreground">{i.postMeta.caption || "No caption"}</p>
+                          <div className="flex items-center justify-between">
+                            <p className="text-[10px] text-muted-foreground">{fmtT(i.scheduledAt)}</p>
+                            <PostTypeBadge postMeta={i.postMeta}/>
+                          </div>
                         </div>
                       </button>
                     ))}
@@ -1053,10 +997,11 @@ function QueueView({items,onOpen,onCancel,onPublishNow,onRetry,onSchedule}:{
             </button>
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2">
-                <p className="truncate text-sm font-semibold">{i.contentName}</p>
+                <p className="truncate text-sm font-semibold">{i.character}</p>
                 <QueueBadge status={i.queueStatus}/>
+                <PostTypeBadge postMeta={i.postMeta}/>
               </div>
-              <p className="mt-0.5 text-xs text-muted-foreground">{i.character}</p>
+              <p className="mt-1 line-clamp-1 text-xs text-muted-foreground">{i.postMeta.caption || "No caption set — edit in Review"}</p>
               <p className="mt-1 inline-flex items-center gap-1 text-xs text-muted-foreground"><Clock className="h-3 w-3"/>{fmtDT(i.scheduledAt)}</p>
               {!i.mediaUrl&&<p className="mt-1 text-[10px] text-destructive font-medium">⚠ No media URL — check Supabase images/videos table</p>}
             </div>
@@ -1094,20 +1039,21 @@ function HistoryView({items,onOpen,onRetry}:{items:ScheduledItem[];onOpen:(i:Sch
   return(
     <Card className="border-border/60 bg-card"><CardContent className="p-0">
       <div className="grid grid-cols-12 gap-3 border-b border-border/60 px-4 py-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-        <div className="col-span-6">Content</div><div className="col-span-3">Published</div>
+        <div className="col-span-5">Content</div><div className="col-span-2">Type</div><div className="col-span-2">Published</div>
         <div className="col-span-2">Post ID</div><div className="col-span-1 text-right">Status</div>
       </div>
       {items.map(i=>(
         <button key={i.id} type="button" onClick={()=>onOpen(i)}
           className="grid w-full grid-cols-12 items-center gap-3 border-b border-border/40 px-4 py-3 text-left hover:bg-muted/40 last:border-b-0 transition-colors">
-          <div className="col-span-6 flex items-center gap-3">
+          <div className="col-span-5 flex items-center gap-3">
             <div className="relative h-12 w-16 shrink-0 overflow-hidden rounded">
               <img src={i.thumbnail} alt="" className="h-full w-full object-cover"/>
               {i.type==="video"&&<div className="absolute inset-0 grid place-items-center bg-black/30"><Play className="h-3.5 w-3.5 text-white"/></div>}
             </div>
-            <div className="min-w-0"><p className="truncate text-sm font-medium">{i.contentName}</p><p className="truncate text-xs text-muted-foreground">{i.character}</p></div>
+            <div className="min-w-0"><p className="truncate text-sm font-medium">{i.character}</p><p className="truncate text-xs text-muted-foreground">{i.postMeta.caption || "No caption"}</p></div>
           </div>
-          <div className="col-span-3 text-xs text-muted-foreground">{i.publishedAt?fmtDT(i.publishedAt):fmtDT(i.scheduledAt)}</div>
+          <div className="col-span-2"><PostTypeBadge postMeta={i.postMeta}/></div>
+          <div className="col-span-2 text-xs text-muted-foreground">{i.publishedAt?fmtDT(i.publishedAt):fmtDT(i.scheduledAt)}</div>
           <div className="col-span-2">
             {i.externalPostId
               ?<a href={`https://www.fanvue.com/post/${i.externalPostId}`} target="_blank" rel="noopener noreferrer"
@@ -1137,6 +1083,10 @@ function EmptyState({onSchedule,message="No scheduled content."}:{onSchedule:()=
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Detail Sheet — now shows Post Details (Normal/PPV, price, caption) instead
+// of raw generation settings (fps / scenes / sampling steps).
+// ─────────────────────────────────────────────────────────────────────────────
 function DetailSheet({item,onClose,fanvueToken,onRetry,onPublishNow,onRemove}:{
   item:ScheduledItem|null;onClose:()=>void;fanvueToken:StoredToken|null;
   onRetry:(id:string)=>void;onPublishNow:(id:string)=>void;onRemove:(id:string)=>void;
@@ -1147,8 +1097,8 @@ function DetailSheet({item,onClose,fanvueToken,onRetry,onPublishNow,onRemove}:{
         {item&&(
           <>
             <SheetHeader>
-              <SheetTitle className="flex items-center gap-2">{item.contentName}<StatusBadge status={item.status}/></SheetTitle>
-              <SheetDescription>{item.character} · {item.type} · {fmtDT(item.scheduledAt)}</SheetDescription>
+              <SheetTitle className="flex items-center gap-2">{item.character}<StatusBadge status={item.status}/></SheetTitle>
+              <SheetDescription>{item.type} · {fmtDT(item.scheduledAt)}</SheetDescription>
             </SheetHeader>
             <div className="mt-6 space-y-5">
               <div className="relative aspect-video overflow-hidden rounded-lg bg-muted">
@@ -1156,6 +1106,22 @@ function DetailSheet({item,onClose,fanvueToken,onRetry,onPublishNow,onRemove}:{
                   ?<video src={item.mediaUrl||item.thumbnail} controls playsInline className="h-full w-full object-cover"/>
                   :<img src={item.mediaUrl||item.thumbnail} alt="" className="h-full w-full object-cover"/>}
               </div>
+
+              {/* Post details — what review.tsx set, what actually gets sent to Fanvue */}
+              <div className="space-y-2 rounded-lg border border-border bg-muted/20 p-4">
+                <div className="flex items-center justify-between">
+                  <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Post Details</p>
+                  <PostTypeBadge postMeta={item.postMeta}/>
+                </div>
+                {item.postMeta.postType==="ppv"&&(
+                  <p className="text-sm">Price: <span className="font-semibold">${item.postMeta.price}</span></p>
+                )}
+                <div>
+                  <p className="text-xs text-muted-foreground mb-1">Caption</p>
+                  <p className="text-sm leading-relaxed whitespace-pre-wrap">{item.postMeta.caption || <span className="text-muted-foreground italic">No caption set — edit in Review Queue</span>}</p>
+                </div>
+              </div>
+
               <div className="grid grid-cols-2 gap-3">
                 <div className="rounded-md border border-border bg-background/40 p-3">
                   <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Scheduled</p>
@@ -1184,12 +1150,6 @@ function DetailSheet({item,onClose,fanvueToken,onRetry,onPublishNow,onRemove}:{
                   </a>
                 </div>
               )}
-              <div>
-                <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Scene prompts</p>
-                <ScrollArea className="h-32 rounded-md border border-border bg-background/40 p-3">
-                  <ol className="space-y-2 text-xs">{item.scenePrompts.map((p,i)=><li key={i} className="leading-relaxed"><span className="mr-1 text-muted-foreground">{i+1}.</span>{p}</li>)}</ol>
-                </ScrollArea>
-              </div>
               <div>
                 <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">History</p>
                 <ol className="relative space-y-3 border-l border-border pl-4">
@@ -1244,12 +1204,13 @@ function CreateScheduleDialog({open,onOpenChange,fanvueToken}:{
       onOpenChange(false);
     }catch(e:any){toast.error(e?.message??"Failed to schedule");}
   };
+  const selectedAsset = assets[Number(contentIdx)];
   return(
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>Schedule content</DialogTitle>
-          <DialogDescription>Queue an approved asset for publishing to Fanvue.</DialogDescription>
+          <DialogDescription>Queue an approved asset for publishing to Fanvue. Caption, post type and price are set in the Review Queue.</DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
           <div className="space-y-1.5">
@@ -1261,6 +1222,15 @@ function CreateScheduleDialog({open,onOpenChange,fanvueToken}:{
                 <SelectContent>{assets.map((a,i)=><SelectItem key={a.id} value={String(i)}>{a.name}</SelectItem>)}</SelectContent>
               </Select>}
           </div>
+          {selectedAsset&&(
+            <div className="space-y-1.5 rounded-md border border-border bg-muted/20 px-3 py-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-muted-foreground">Post details</span>
+                <PostTypeBadge postMeta={selectedAsset.postMeta}/>
+              </div>
+              <p className="line-clamp-2 text-xs text-muted-foreground">{selectedAsset.postMeta.caption || "No caption set — edit in Review Queue"}</p>
+            </div>
+          )}
           <div className="space-y-1.5">
             <Label>Publishing account</Label>
             {fanvueToken
@@ -1308,7 +1278,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const { code, code_verifier, redirect_uri, client_id, client_secret } = req.body;
   if (!code || !code_verifier) return res.status(400).json({ error: "Missing params" });
 
-  // Exchange code for tokens (server-side — no CORS issue)
   const tokenRes = await fetch("https://auth.fanvue.com/oauth2/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -1327,7 +1296,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const tokens = JSON.parse(tokenText);
 
-  // Fetch profile using correct endpoint from Fanvue docs: GET /users/me
   let profile = null;
   try {
     const meRes = await fetch("https://api.fanvue.com/users/me", {
@@ -1341,6 +1309,5 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   return res.status(200).json({ ...tokens, profile });
 }
-
 
 */
