@@ -96,7 +96,7 @@ interface ImageJobState {
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-const RECOMMENDED = { fps: 16, framesPerScene: 162, numScenes: 10, samplingSteps: 6 };
+const RECOMMENDED = { fps: 16, framesPerScene: 81, numScenes: 10, samplingSteps: 6 };
 
 const SAMPLE_PROMPTS = [
   "A stable medium-wide shot. She reaches down and opens a notebook, sketching a butterfly. The lines begin to glow with golden light.",
