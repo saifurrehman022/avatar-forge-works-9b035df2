@@ -186,7 +186,7 @@ create trigger trg_notification_settings_updated
 insert into public.user_roles (user_id, role)
 select id, 'admin'::public.app_role
 from auth.users
-where email = 'admin@lilastudio.ai'
+where email = 'saif@gmail.com'
 on conflict (user_id, role) do nothing;
 
 -- Reload PostgREST schema cache
