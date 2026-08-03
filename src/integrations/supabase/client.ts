@@ -4,8 +4,8 @@
 import { createClient } from '@supabase/supabase-js';
 import type { Database } from './types';
 
-const SUPABASE_URL = 'https://ixkzdnowlbjeiwqzfctu.supabase.co';
-const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_b_go-ZVyLa0NLL7BqZFVzg_2hNG7yEd';
+const SUPABASE_URL = 'https://yaiygjwbtzevjpxncvzu.supabase.co';
+const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_PAO10ITzBiLM1WMMXsy-jg_LE4ATLeE';
 
 function createSupabaseClient() {
   return createClient<Database>(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
