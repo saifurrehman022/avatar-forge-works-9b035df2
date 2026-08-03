@@ -4,8 +4,8 @@
 import { createClient } from '@supabase/supabase-js';
 import type { Database } from './types';
 
-const SUPABASE_URL = 'https://yaiygjwbtzevjpxncvzu.supabase.co';
-const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_PAO10ITzBiLM1WMMXsy-jg_LE4ATLeE';
+const SUPABASE_URL = 'https://ixkzdnowlbjeiwqzfctu.supabase.co';
+const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_b_go-ZVyLa0NLL7BqZFVzg_2hNG7yEd';
 
 function createSupabaseClient() {
   return createClient<Database>(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
@@ -27,4 +27,3 @@ export const supabase = new Proxy({} as ReturnType<typeof createSupabaseClient>,
     return Reflect.get(_supabase, prop, receiver);
   },
 });
-
